@@ -1,0 +1,62 @@
+name: ffmpeg
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ffmpeg-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # macos-latest is Apple silicon; the artifact is macOS arm64 only.
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - run: deno fmt --check
+      - run: deno lint
+      - run: deno check tools/ffmpeg/build.ts tools/ffmpeg/verify.ts
+
+      - name: Build the artifact
+        run: deno task ffmpeg-build --out dist-ffmpeg
+
+      # Independent of the build's own staging checks: this expands the four
+      # zips as a consumer would and asserts structure, install names, plists,
+      # signatures, and module importability.
+      - name: Verify the artifact
+        run: deno task ffmpeg-verify dist-ffmpeg
+
+      - name: Report install names
+        run: |
+          set -euo pipefail
+          rm -rf dist-ffmpeg/expanded
+          mkdir -p dist-ffmpeg/expanded
+          ditto -x -k dist-ffmpeg/ffmpeg-*-macos-arm64.zip dist-ffmpeg/expanded
+          for lib in libavutil libswresample libavcodec; do
+            binary="dist-ffmpeg/expanded/$lib.xcframework/macos-arm64/$lib.framework/Versions/A/$lib"
+            echo "== $lib"
+            otool -D "$binary"
+            otool -L "$binary"
+          done
+          rm -rf dist-ffmpeg/expanded
+
+      - name: Checksums
+        run: shasum -a 256 dist-ffmpeg/*.zip | tee dist-ffmpeg/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-macos-arm64
+          path: dist-ffmpeg/*
+          if-no-files-found: error
+          retention-days: 14
