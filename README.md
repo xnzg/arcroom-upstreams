@@ -132,12 +132,21 @@ pinned asset is never overwritten under a consumer that recorded its checksum.
 4. Copy the generated `PROVENANCE.md` out of the combined zip to the repo root.
 
 libsmb2 follows the same process with `artifactRevision` in
-`tools/libsmb2/build.ts` and `deno task libsmb2-build`. Update all four version
-literals below together; never use a glob, because a stale artifact from an
-older build must not enter a release:
+`tools/libsmb2/build.ts` and `deno task libsmb2-build`. Build and verify from a
+clean, current `main`, then create and push the tag at that exact verified
+commit before creating the release. Update all four version literals below
+together; never use a glob, because a stale artifact from an older build must
+not enter a release:
 
 ```sh
-gh release create libsmb2/6.2-arcroom.1 \
+test -z "$(git status --porcelain)"
+git fetch origin main --tags
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+deno task libsmb2-build
+deno task libsmb2-verify dist-libsmb2
+git tag libsmb2/6.2-arcroom.1 HEAD
+git push origin refs/tags/libsmb2/6.2-arcroom.1
+gh release create libsmb2/6.2-arcroom.1 --verify-tag \
   dist-libsmb2/libsmb2-6.2-arcroom.1-macos-arm64.zip \
   dist-libsmb2/CSMB2-6.2-arcroom.1-macos-arm64.zip \
   dist-libsmb2/libsmb2-6.2-source.tar.gz
