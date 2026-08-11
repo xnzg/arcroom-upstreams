@@ -19,13 +19,23 @@ of upstream tag `libsmb2-6.2` for macOS arm64. `libsmb2.xcframework` exposes the
 high-level public API as Clang module `CSMB2`; built-in NTLMSSP is enabled and
 Kerberos/GSSAPI is disabled.
 
-The release has two assets:
+The release has three assets:
 
 - `libsmb2-6.2-arcroom.1-macos-arm64.zip` — the XCFramework, upstream
   `LICENCE-LGPL-2.1.txt`, and generated `PROVENANCE.md`, for a Bazel
   `apple_static_xcframework_import`.
 - `CSMB2-6.2-arcroom.1-macos-arm64.zip` — the same XCFramework alone at the
   archive root, in the shape required by a SwiftPM `binaryTarget`.
+- `libsmb2-6.2-source.tar.gz` — the exact pinned upstream source tarball,
+  including `LICENCE-LGPL-2.1.txt`; its sha256 is
+  `8e1f9efc6b2e0f6546f0fe121ac0ddf4fc2f0908ae5a6bd1f185be7c9e0bcbb3`.
+
+SwiftPM binary targets cannot carry the license and provenance beside the
+XCFramework at the archive root, so the release's combined archive supplies
+those notices and the source asset supplies the durable corresponding source.
+An application distributor must still carry the required notice and provide
+its object files or an equivalent relinking mechanism; these assets do not by
+themselves discharge that distributor's LGPL obligations.
 
 This one-slice platform set deliberately matches the ffmpeg artifact below.
 The earlier plan said libsmb2 would cover all Apple platforms, but ffmpeg does
@@ -75,14 +85,15 @@ unmodified upstream tarball with the configuration recorded above.
 
 ## Reproducing the build
 
-Requirements: Apple silicon, macOS 15 or later, the Xcode command line tools,
-and [Deno](https://deno.com). Nothing else — this repo has no third-party
-dependencies.
+Requirements: Apple silicon, macOS 15 or later, full Xcode (not only the
+standalone command line tools), and [Deno](https://deno.com). Creating an
+XCFramework requires `xcodebuild`, which the standalone tools do not provide.
+This repo has no third-party dependencies.
 
 ```sh
 deno task ffmpeg-build                 # writes dist-ffmpeg/*.zip, prints sha256s
 deno task ffmpeg-verify dist-ffmpeg    # expands the zips and asserts the layout
-deno task libsmb2-build                # writes dist-libsmb2/*.zip
+deno task libsmb2-build                # writes two zips and the source tarball
 deno task libsmb2-verify dist-libsmb2  # verifies archive, module, and link
 ```
 
@@ -121,10 +132,15 @@ pinned asset is never overwritten under a consumer that recorded its checksum.
 4. Copy the generated `PROVENANCE.md` out of the combined zip to the repo root.
 
 libsmb2 follows the same process with `artifactRevision` in
-`tools/libsmb2/build.ts`, `deno task libsmb2-build`, and:
+`tools/libsmb2/build.ts` and `deno task libsmb2-build`. Update all four version
+literals below together; never use a glob, because a stale artifact from an
+older build must not enter a release:
 
 ```sh
-gh release create libsmb2/<version>-arcroom.<n> dist-libsmb2/*.zip
+gh release create libsmb2/6.2-arcroom.1 \
+  dist-libsmb2/libsmb2-6.2-arcroom.1-macos-arm64.zip \
+  dist-libsmb2/CSMB2-6.2-arcroom.1-macos-arm64.zip \
+  dist-libsmb2/libsmb2-6.2-source.tar.gz
 ```
 
 Copy its generated provenance to `PROVENANCE-libsmb2.md`.

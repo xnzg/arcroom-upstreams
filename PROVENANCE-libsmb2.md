@@ -14,13 +14,17 @@ artifact.
 - Authentication: built-in NTLMSSP; Kerberos/GSSAPI is disabled.
 - Deployment target: macOS 15.0, arm64.
 - Clang module: CSMB2.
+- Xcode: 26.4.1 (build 17E202).
+- Apple clang: Apple clang version 21.0.0 (clang-2100.0.123.102).
+- macOS SDK: 26.4.
 
 ## Build
 
 The unmodified source files listed by upstream's `lib/CMakeLists.txt` are
 compiled directly with the Xcode clang and archived with the Xcode ar. Two
-translation units that produce no symbols for this configuration are not
-placed in the archive. The `krb5-wrapper.c` translation unit is omitted because
+translation units, `compat.c` and `sha1.c`, that produce no symbols for this
+configuration are not placed in the archive. The `krb5-wrapper.c` translation
+unit is omitted because
 Kerberos/GSSAPI support is deliberately disabled. Feature defines describe the
 macOS SDK headers and socket structures; no source file is patched.
 
@@ -70,8 +74,11 @@ unmodified upstream public headers and a generated `CSMB2` module
 map. The platform set deliberately matches the ffmpeg artifact present in this
 repository at this revision: macOS arm64 only. The older README plan to cover
 all Apple platforms is not the platform set that ffmpeg currently ships.
-The combined archive carries this provenance and the license; the SwiftPM
-archive carries the identical XCFramework alone at its root.
+The combined archive carries this provenance and the license; SwiftPM requires
+the binary target's XCFramework alone at its archive root. The release therefore
+also carries the exact pinned upstream source tarball as
+`libsmb2-6.2-source.tar.gz`; its sha256 is the source sha256 above and its root
+contains the upstream LGPL license.
 
 Because this is a static LGPL library, an application distributor must satisfy
 LGPL v2.1 section 6, including providing the application object files or an

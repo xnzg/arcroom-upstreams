@@ -15,6 +15,7 @@ export const artifactSuffix =
 export const artifactName = `libsmb2-${artifactSuffix}.zip`
 export const moduleName = 'CSMB2'
 export const swiftPMArtifactName = `${moduleName}-${artifactSuffix}.zip`
+export const sourceArtifactName = `libsmb2-${upstreamVersion}-source.tar.gz`
 export const releaseTag =
   `libsmb2/${upstreamVersion}-arcroom.${artifactRevision}`
 export const minimumMacOSVersion = '15.0'
@@ -72,6 +73,59 @@ const sources = [
   'timestamps.c',
   'unicode.c',
   'usha.c',
+]
+
+export const expectedObjectNames = [
+  'aes.o',
+  'aes128ccm.o',
+  'alloc.o',
+  'asn1-ber.o',
+  'dcerpc.o',
+  'dcerpc-lsa.o',
+  'dcerpc-srvsvc.o',
+  'errors.o',
+  'hmac.o',
+  'hmac-md5.o',
+  'init.o',
+  'libsmb2.o',
+  'md4c.o',
+  'md5.o',
+  'ntlmssp.o',
+  'pdu.o',
+  'sha224-256.o',
+  'sha384-512.o',
+  'smb2-cmd-close.o',
+  'smb2-cmd-create.o',
+  'smb2-cmd-echo.o',
+  'smb2-cmd-error.o',
+  'smb2-cmd-flush.o',
+  'smb2-cmd-ioctl.o',
+  'smb2-cmd-lock.o',
+  'smb2-cmd-logoff.o',
+  'smb2-cmd-negotiate.o',
+  'smb2-cmd-notify-change.o',
+  'smb2-cmd-oplock-break.o',
+  'smb2-cmd-query-directory.o',
+  'smb2-cmd-query-info.o',
+  'smb2-cmd-read.o',
+  'smb2-cmd-session-setup.o',
+  'smb2-cmd-set-info.o',
+  'smb2-cmd-tree-connect.o',
+  'smb2-cmd-tree-disconnect.o',
+  'smb2-cmd-write.o',
+  'smb2-data-file-info.o',
+  'smb2-data-filesystem-info.o',
+  'smb2-data-security-descriptor.o',
+  'smb2-data-reparse-point.o',
+  'smb2-share-enum.o',
+  'smb2-signing.o',
+  'smb3-seal.o',
+  'socket.o',
+  'spnego-wrapper.o',
+  'sync.o',
+  'timestamps.o',
+  'unicode.o',
+  'usha.o',
 ]
 
 export const publicHeaders = [
@@ -199,12 +253,17 @@ async function fetchSource(scratch: string): Promise<string> {
   return tarball
 }
 
-async function extractSource(scratch: string): Promise<string> {
+interface Source {
+  directory: string
+  tarball: string
+}
+
+async function extractSource(scratch: string): Promise<Source> {
   const tarball = await fetchSource(scratch)
   const source = join(scratch, `libsmb2-${upstreamTag}`)
   await Deno.remove(source, { recursive: true }).catch(() => {})
   await run(['tar', 'xzf', tarball], scratch)
-  return source
+  return { directory: source, tarball }
 }
 
 function compileFlags(source: string, sdk: string): string[] {
@@ -262,6 +321,12 @@ async function buildArchive(source: string, scratch: string): Promise<string> {
       objectPaths.push(object)
     }
   }
+  const objectNames = objectPaths.map(basename).sort()
+  if (objectNames.join('\n') !== expectedObjectNames.toSorted().join('\n')) {
+    throw new Error(
+      `unexpected nonempty objects:\n${objectNames.join('\n')}`,
+    )
+  }
   const archive = join(scratch, 'libsmb2.a')
   await Deno.remove(archive).catch(() => {})
   await run(['xcrun', '--sdk', 'macosx', 'ar', 'rcs', archive, ...objectPaths])
@@ -300,7 +365,36 @@ async function stageHeaders(source: string, scratch: string): Promise<string> {
   return headers
 }
 
-function provenance(): string {
+interface Toolchain {
+  xcodeVersion: string
+  xcodeBuild: string
+  clangVersion: string
+  sdkVersion: string
+}
+
+async function toolchain(): Promise<Toolchain> {
+  const xcode = (await output(['xcodebuild', '-version'])).trim().split('\n')
+  const clang = (await output([
+    'xcrun',
+    '--sdk',
+    'macosx',
+    'clang',
+    '--version',
+  ])).split('\n')[0]!.trim()
+  return {
+    xcodeVersion: xcode[0]?.replace(/^Xcode /, '') ?? '',
+    xcodeBuild: xcode[1]?.replace(/^Build version /, '') ?? '',
+    clangVersion: clang,
+    sdkVersion: (await output([
+      'xcrun',
+      '--sdk',
+      'macosx',
+      '--show-sdk-version',
+    ])).trim(),
+  }
+}
+
+function provenance(toolchain: Toolchain): string {
   return `# libsmb2 ${upstreamVersion} for Arcroom (macOS arm64)
 
 Built by \`tools/libsmb2/build.ts\` in github.com/xnzg/arcroom-upstreams.
@@ -317,13 +411,17 @@ artifact.
 - Authentication: built-in NTLMSSP; Kerberos/GSSAPI is disabled.
 - Deployment target: macOS ${minimumMacOSVersion}, arm64.
 - Clang module: ${moduleName}.
+- Xcode: ${toolchain.xcodeVersion} (build ${toolchain.xcodeBuild}).
+- Apple clang: ${toolchain.clangVersion}.
+- macOS SDK: ${toolchain.sdkVersion}.
 
 ## Build
 
 The unmodified source files listed by upstream's \`lib/CMakeLists.txt\` are
 compiled directly with the Xcode clang and archived with the Xcode ar. Two
-translation units that produce no symbols for this configuration are not
-placed in the archive. The \`krb5-wrapper.c\` translation unit is omitted because
+translation units, \`compat.c\` and \`sha1.c\`, that produce no symbols for this
+configuration are not placed in the archive. The \`krb5-wrapper.c\` translation
+unit is omitted because
 Kerberos/GSSAPI support is deliberately disabled. Feature defines describe the
 macOS SDK headers and socket structures; no source file is patched.
 
@@ -343,8 +441,11 @@ unmodified upstream public headers and a generated \`${moduleName}\` module
 map. The platform set deliberately matches the ffmpeg artifact present in this
 repository at this revision: macOS arm64 only. The older README plan to cover
 all Apple platforms is not the platform set that ffmpeg currently ships.
-The combined archive carries this provenance and the license; the SwiftPM
-archive carries the identical XCFramework alone at its root.
+The combined archive carries this provenance and the license; SwiftPM requires
+the binary target's XCFramework alone at its archive root. The release therefore
+also carries the exact pinned upstream source tarball as
+\`${sourceArtifactName}\`; its sha256 is the source sha256 above and its root
+contains the upstream LGPL license.
 
 Because this is a static LGPL library, an application distributor must satisfy
 LGPL v2.1 section 6, including providing the application object files or an
@@ -357,6 +458,8 @@ async function packageArtifact(
   source: string,
   archive: string,
   headers: string,
+  sourceTarball: string,
+  toolchain: Toolchain,
   scratch: string,
   outDir: string,
 ): Promise<string[]> {
@@ -377,12 +480,24 @@ async function packageArtifact(
     join(source, 'LICENCE-LGPL-2.1.txt'),
     join(stage, 'LICENCE-LGPL-2.1.txt'),
   )
-  await Deno.writeTextFile(join(stage, 'PROVENANCE.md'), provenance())
+  await Deno.writeTextFile(
+    join(stage, 'PROVENANCE.md'),
+    provenance(toolchain),
+  )
 
   const resolvedOut = resolve(outDir)
   await Deno.mkdir(resolvedOut, { recursive: true })
+  for await (const entry of Deno.readDir(resolvedOut)) {
+    if (
+      entry.isFile &&
+      (entry.name.startsWith('libsmb2-') ||
+        entry.name.startsWith(`${moduleName}-`)) &&
+      (entry.name.endsWith('.zip') || entry.name.endsWith('.tar.gz'))
+    ) {
+      await Deno.remove(join(resolvedOut, entry.name))
+    }
+  }
   const zip = join(resolvedOut, artifactName)
-  await Deno.remove(zip).catch(() => {})
   await run([
     'zip',
     '-r',
@@ -394,7 +509,6 @@ async function packageArtifact(
     'PROVENANCE.md',
   ], stage)
   const swiftPMZip = join(resolvedOut, swiftPMArtifactName)
-  await Deno.remove(swiftPMZip).catch(() => {})
   await run([
     'ditto',
     '-c',
@@ -403,7 +517,9 @@ async function packageArtifact(
     join(stage, 'libsmb2.xcframework'),
     swiftPMZip,
   ])
-  return [zip, swiftPMZip]
+  const sourceArchive = join(resolvedOut, sourceArtifactName)
+  await Deno.copyFile(sourceTarball, sourceArchive)
+  return [zip, swiftPMZip, sourceArchive]
 }
 
 export async function main(argv: string[]): Promise<void> {
@@ -415,17 +531,21 @@ export async function main(argv: string[]): Promise<void> {
   await Deno.mkdir(scratch, { recursive: true })
   try {
     const source = await extractSource(scratch)
-    const archive = await buildArchive(source, scratch)
-    const headers = await stageHeaders(source, scratch)
-    const zips = await packageArtifact(
-      source,
+    const archive = await buildArchive(source.directory, scratch)
+    const headers = await stageHeaders(source.directory, scratch)
+    const artifacts = await packageArtifact(
+      source.directory,
       archive,
       headers,
+      source.tarball,
+      await toolchain(),
       scratch,
       args.out,
     )
     console.log(`\ntag ${releaseTag}`)
-    for (const zip of zips) console.log(`${await sha256(zip)}  ${zip}`)
+    for (const artifact of artifacts) {
+      console.log(`${await sha256(artifact)}  ${artifact}`)
+    }
   } finally {
     if (!args.keep) {
       for (
