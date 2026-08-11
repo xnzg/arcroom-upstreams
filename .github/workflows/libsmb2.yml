@@ -1,0 +1,57 @@
+name: libsmb2
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: libsmb2-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - run: deno fmt --check
+      - run: deno lint
+      - run: deno check tools/libsmb2/build.ts tools/libsmb2/verify.ts
+
+      - name: Build the artifact
+        run: deno task libsmb2-build --out dist-libsmb2
+
+      - name: Verify the artifact
+        run: deno task libsmb2-verify dist-libsmb2
+
+      - name: Report archive
+        run: |
+          set -euo pipefail
+          rm -rf dist-libsmb2/expanded
+          mkdir -p dist-libsmb2/expanded
+          ditto -x -k dist-libsmb2/libsmb2-*-macos-arm64.zip dist-libsmb2/expanded
+          archive="dist-libsmb2/expanded/libsmb2.xcframework/macos-arm64/libsmb2.a"
+          lipo -info "$archive"
+          ar -t "$archive"
+          nm -gU "$archive" | grep 'smb2_init_context'
+          rm -rf dist-libsmb2/expanded
+
+      - name: Checksums
+        working-directory: dist-libsmb2
+        run: shasum -a 256 *.zip | tee SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libsmb2-macos-arm64
+          path: dist-libsmb2/*
+          if-no-files-found: error
+          retention-days: 14

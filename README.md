@@ -1,14 +1,42 @@
 # arcroom-upstreams
 
 [![ffmpeg](https://github.com/xnzg/arcroom-upstreams/actions/workflows/ffmpeg.yml/badge.svg)](https://github.com/xnzg/arcroom-upstreams/actions/workflows/ffmpeg.yml)
+[![libsmb2](https://github.com/xnzg/arcroom-upstreams/actions/workflows/libsmb2.yml/badge.svg)](https://github.com/xnzg/arcroom-upstreams/actions/workflows/libsmb2.yml)
 
-Prebuilt, relinkable dynamic xcframeworks of LGPL-2.1 C libraries consumed by
-the [Arcroom](https://github.com/wuhu-labs/wuhu) app, and the build scripts that
-produce them. Each release ships the libraries as separate dynamic frameworks
-precisely so that a user can relink the application against their own build of
-the same libraries, as LGPL-2.1 section 6 requires.
+Pinned Apple-platform builds of LGPL-2.1 C libraries consumed by the
+[Arcroom](https://github.com/wuhu-labs/wuhu) app, and the scripts that produce
+them. ffmpeg ships as relinkable dynamic frameworks. libsmb2 is a static
+XCFramework; an application distributing it must provide its relinkable object
+files or an equivalent mechanism in addition to the corresponding source and
+license required by LGPL-2.1 section 6.
 
-## Current resident: ffmpeg 8.1.2
+## Current residents
+
+### libsmb2 6.2
+
+Release tag `libsmb2/6.2-arcroom.1` carries an unmodified, unforked static build
+of upstream tag `libsmb2-6.2` for macOS arm64. `libsmb2.xcframework` exposes the
+high-level public API as Clang module `CSMB2`; built-in NTLMSSP is enabled and
+Kerberos/GSSAPI is disabled.
+
+The release has two assets:
+
+- `libsmb2-6.2-arcroom.1-macos-arm64.zip` — the XCFramework, upstream
+  `LICENCE-LGPL-2.1.txt`, and generated `PROVENANCE.md`, for a Bazel
+  `apple_static_xcframework_import`.
+- `CSMB2-6.2-arcroom.1-macos-arm64.zip` — the same XCFramework alone at the
+  archive root, in the shape required by a SwiftPM `binaryTarget`.
+
+This one-slice platform set deliberately matches the ffmpeg artifact below.
+The earlier plan said libsmb2 would cover all Apple platforms, but ffmpeg does
+not yet do so; additional slices belong in a later coordinated artifact
+revision.
+
+Corresponding source and the complete build configuration are recorded in
+[`PROVENANCE-libsmb2.md`](PROVENANCE-libsmb2.md). The source tag resolves to
+commit `d67e213a5c4e7e4969fd81f0b95e4ca5831fbba1`; no source is modified.
+
+### ffmpeg 8.1.2
 
 Release tag `ffmpeg/8.1.2-arcroom.1` carries three frameworks — `libavutil`,
 `libswresample`, `libavcodec` — for macOS arm64, built with an audio-only codec
@@ -54,6 +82,8 @@ dependencies.
 ```sh
 deno task ffmpeg-build                 # writes dist-ffmpeg/*.zip, prints sha256s
 deno task ffmpeg-verify dist-ffmpeg    # expands the zips and asserts the layout
+deno task libsmb2-build                # writes dist-libsmb2/*.zip
+deno task libsmb2-verify dist-libsmb2  # verifies archive, module, and link
 ```
 
 `ffmpeg-build` accepts `--out <dir>` for the output directory, `--scratch <dir>`
@@ -75,12 +105,11 @@ reproduces is the corresponding source and the configuration.
 
 ## CI
 
-[`.github/workflows/ffmpeg.yml`](.github/workflows/ffmpeg.yml) runs the same two
+The ffmpeg and libsmb2 workflows run their respective build and verification
 tasks on a GitHub-hosted macOS arm64 runner on every push to `main`, on pull
-requests, and on demand. It uploads the four zips and their `SHA256SUMS` as a
-workflow artifact. It does not publish releases: those stay manual, so that a
-pinned asset is never overwritten under a consumer that has already recorded its
-checksum.
+requests, and on demand. They upload the release-shaped zips and `SHA256SUMS`
+as workflow artifacts. They do not publish releases: those stay manual, so a
+pinned asset is never overwritten under a consumer that recorded its checksum.
 
 ## Publishing a release
 
@@ -91,11 +120,16 @@ checksum.
    printed sha256 table in the release notes.
 4. Copy the generated `PROVENANCE.md` out of the combined zip to the repo root.
 
+libsmb2 follows the same process with `artifactRevision` in
+`tools/libsmb2/build.ts`, `deno task libsmb2-build`, and:
+
+```sh
+gh release create libsmb2/<version>-arcroom.<n> dist-libsmb2/*.zip
+```
+
+Copy its generated provenance to `PROVENANCE-libsmb2.md`.
+
 Never replace an asset on an existing release: consumers pin by checksum.
-
-## Planned
-
-- libsmb2 (all Apple platforms)
 
 ## License
 
