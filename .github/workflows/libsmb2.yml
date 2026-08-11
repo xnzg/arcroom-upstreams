@@ -1,0 +1,65 @@
+name: libsmb2
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: libsmb2-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.9.5
+
+      - run: deno fmt --check
+      - run: deno lint
+      - run: deno check tools/libsmb2/build.ts tools/libsmb2/verify.ts
+
+      - name: Build the artifact
+        run: deno task libsmb2-build --out dist-libsmb2
+
+      - name: Verify the artifact
+        run: deno task libsmb2-verify dist-libsmb2
+
+      - name: Report archive
+        run: |
+          set -euo pipefail
+          rm -rf dist-libsmb2/expanded
+          mkdir -p dist-libsmb2/expanded
+          ditto -x -k dist-libsmb2/libsmb2-6.2-arcroom.1-macos-arm64.zip dist-libsmb2/expanded
+          archive="dist-libsmb2/expanded/libsmb2.xcframework/macos-arm64/libsmb2.a"
+          lipo -info "$archive"
+          ar -t "$archive"
+          nm -gU "$archive" | grep 'smb2_init_context'
+          rm -rf dist-libsmb2/expanded
+
+      - name: Checksums
+        working-directory: dist-libsmb2
+        run: |
+          shasum -a 256 \
+            libsmb2-6.2-arcroom.1-macos-arm64.zip \
+            CSMB2-6.2-arcroom.1-macos-arm64.zip \
+            libsmb2-6.2-source.tar.gz | tee SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: libsmb2-macos-arm64
+          path: |
+            dist-libsmb2/libsmb2-6.2-arcroom.1-macos-arm64.zip
+            dist-libsmb2/CSMB2-6.2-arcroom.1-macos-arm64.zip
+            dist-libsmb2/libsmb2-6.2-source.tar.gz
+            dist-libsmb2/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
