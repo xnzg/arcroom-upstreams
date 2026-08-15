@@ -19,7 +19,7 @@ export const upstreamURL =
 export const upstreamSHA256 =
   '464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c'
 
-export const artifactRevision = 2
+export const artifactRevision = 3
 export const artifactSuffix =
   `${upstreamVersion}-arcroom.${artifactRevision}-macos-arm64`
 export const releaseTag =
@@ -128,6 +128,10 @@ function configureFlags(): string[] {
     '--disable-version3',
     '--disable-everything',
     '--disable-autodetect',
+    // Matroska ContentCompression: real-world Bluray remuxes ship zlib-
+    // compressed PGS (and sometimes SRT) tracks; without zlib lavf delivers
+    // the payloads still compressed. Links the system /usr/lib/libz.
+    '--enable-zlib',
     '--disable-programs',
     '--disable-doc',
     '--enable-avformat',
