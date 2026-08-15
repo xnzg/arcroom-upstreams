@@ -48,15 +48,17 @@ commit `d67e213a5c4e7e4969fd81f0b95e4ca5831fbba1`; no source is modified.
 
 ### ffmpeg 8.1.2
 
-Release tag `ffmpeg/8.1.2-arcroom.1` carries three frameworks — `libavutil`,
-`libswresample`, `libavcodec` — for macOS arm64, built with an audio-only codec
-allowlist. No libavformat, no libavfilter, no command-line tools, and no GPL,
-version-3, or nonfree components: configured with `--disable-gpl`,
-`--disable-version3`, `--disable-nonfree`.
+Release tag `ffmpeg/8.1.2-arcroom.2` carries five frameworks — `libavutil`,
+`libswresample`, `libswscale`, `libavcodec`, and `libavformat` — for macOS
+arm64. Its explicit allowlist retains Arcroom's audio ladder and adds Matroska
+and ISO-BMFF demuxing, H.264/HEVC decoding, VideoToolbox acceleration and
+encoding, and text-subtitle decoding for the standalone importer experiment.
+There are no muxers, filters, command-line tools, GPL, version-3, or nonfree
+components.
 
 Assets per release:
 
-- `ffmpeg-<version>-macos-arm64.zip` — the combined artifact: all three
+- `ffmpeg-<version>-macos-arm64.zip` — the combined artifact: all five
   xcframeworks plus `COPYING.LGPLv2.1` and `PROVENANCE.md`. This is what the
   monorepo's Bazel build fetches.
 - `lib<name>-<version>-macos-arm64.zip` — one zip per xcframework, laid out for
@@ -76,9 +78,7 @@ bundle's `Frameworks` directory both resolve them.
   exact configure line and codec allowlist, and writes the `PROVENANCE.md` that
   rides in every artifact. A copy of that provenance — including the full
   configure flags — is checked in here as [PROVENANCE.md](PROVENANCE.md),
-  byte-for-byte as it ships inside `ffmpeg/8.1.2-arcroom.1`; it credits the
-  wuhu-app monorepo because that was the script's home when that release was
-  cut.
+  byte-for-byte as it ships inside `ffmpeg/8.1.2-arcroom.2`.
 
 No ffmpeg sources are modified; the binaries are a straight build of the
 unmodified upstream tarball with the configuration recorded above.
@@ -103,7 +103,7 @@ a gigabyte), and `--keep` to leave that tree in place between runs. Under the
 hood the two tasks are `deno run tools/ffmpeg/{build,verify}.ts` with an explicit
 permission set; run them directly if you would rather grant your own.
 
-`ffmpeg-verify` is the artifact gate. It expands the four zips exactly as a
+`ffmpeg-verify` is the artifact gate. It expands the combined and per-library zips exactly as a
 consumer does and asserts the xcframework structure, `Info.plist` contents,
 `@rpath` install names, that nothing links outside `/usr/lib` and
 `/System/Library`, that the code signatures are valid, that every module still

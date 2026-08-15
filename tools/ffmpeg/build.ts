@@ -7,7 +7,7 @@
 // namespace, and pin each asset by sha256 in the consuming repo.
 //
 // LGPL v2.1 (no --enable-gpl, no --enable-version3, no --enable-nonfree): the
-// three libraries ship as separate dynamic frameworks so a user can relink the
+// libraries ship as separate dynamic frameworks so a user can relink the
 // app against their own build, and COPYING.LGPLv2.1 rides in the artifact.
 
 import { basename, join, resolve } from '../lib/path.ts'
@@ -19,16 +19,15 @@ export const upstreamURL =
 export const upstreamSHA256 =
   '464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c'
 
-export const artifactRevision = 1
+export const artifactRevision = 2
 export const artifactSuffix =
   `${upstreamVersion}-arcroom.${artifactRevision}-macos-arm64`
 export const releaseTag =
   `ffmpeg/${upstreamVersion}-arcroom.${artifactRevision}`
 
-// Arcroom demuxes and muxes everything itself; ffmpeg is here to decode and
-// encode audio samples and nothing else. `--disable-everything` turns the whole
-// component table off and these lists turn back on exactly what the import
-// audio ladder can meet.
+// `--disable-everything` turns the component table off. These lists restore the
+// existing audio ladder plus the narrow demux/decode surface used by the
+// standalone importer experiment. Arcroom still authors its own output boxes.
 const decoders = [
   'aac',
   'aac_latm',
@@ -40,6 +39,12 @@ const decoders = [
   'opus',
   'truehd',
   'vorbis',
+  'h264',
+  'hevc',
+  'ass',
+  'movtext',
+  'srt',
+  'webvtt',
   // Every pcm_* decoder ffmpeg 8.1 has except pcm_alaw_at / pcm_mulaw_at, which
   // are AudioToolbox wrappers and would drag an autodetected system backend in.
   'pcm_alaw',
@@ -79,7 +84,7 @@ const decoders = [
   'pcm_vidc',
 ]
 
-const encoders = ['aac', 'eac3']
+const encoders = ['aac', 'eac3', 'h264_videotoolbox']
 
 const parsers = [
   'aac',
@@ -90,9 +95,21 @@ const parsers = [
   'mlp',
   'opus',
   'vorbis',
+  'h264',
+  'hevc',
 ]
 
-export const libraries = ['libavutil', 'libswresample', 'libavcodec']
+const demuxers = ['matroska', 'mov']
+const protocols = ['file']
+const hwaccels = ['h264_videotoolbox', 'hevc_videotoolbox']
+
+export const libraries = [
+  'libavutil',
+  'libswresample',
+  'libswscale',
+  'libavcodec',
+  'libavformat',
+]
 
 export const frameworkVersion = 'A'
 export const minimumMacOSVersion = '15.0'
@@ -113,10 +130,10 @@ function configureFlags(): string[] {
     '--disable-autodetect',
     '--disable-programs',
     '--disable-doc',
-    '--disable-avformat',
+    '--enable-avformat',
     '--disable-avfilter',
     '--disable-avdevice',
-    '--disable-swscale',
+    '--enable-swscale',
     '--disable-network',
     '--disable-protocols',
     '--disable-muxers',
@@ -129,6 +146,7 @@ function configureFlags(): string[] {
     '--enable-pic',
     '--disable-debug',
     '--enable-neon',
+    '--enable-videotoolbox',
     '--install-name-dir=@rpath',
     `--extra-cflags=-mmacosx-version-min=${minimumMacOSVersion}`,
     `--extra-ldflags=-mmacosx-version-min=${minimumMacOSVersion}`,
@@ -139,6 +157,9 @@ function configureFlags(): string[] {
     `--enable-decoder=${decoders.join(',')}`,
     `--enable-encoder=${encoders.join(',')}`,
     `--enable-parser=${parsers.join(',')}`,
+    `--enable-demuxer=${demuxers.join(',')}`,
+    `--enable-protocol=${protocols.join(',')}`,
+    `--enable-hwaccel=${hwaccels.join(',')}`,
   ]
 }
 
@@ -521,8 +542,11 @@ ${configureFlags().join(' \\\n  ')}
 - decoders: ${decoders.join(' ')}
 - encoders: ${encoders.join(' ')}
 - parsers: ${parsers.join(' ')}
-- no muxers, demuxers, protocols, filters, devices, or bitstream filters
-- no libavformat, libavfilter, libavdevice, libswscale, and no command-line tools
+- demuxers: ${demuxers.join(' ')}
+- protocols: ${protocols.join(' ')}
+- hardware accelerators: ${hwaccels.join(' ')}
+- no muxers, filters, devices, or bitstream filters
+- no libavfilter, libavdevice, or command-line tools
 
 ## Frameworks
 

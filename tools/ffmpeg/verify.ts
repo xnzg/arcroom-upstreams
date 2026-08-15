@@ -1,4 +1,4 @@
-// Artifact gate. Runs against the four zips as published — never against the
+// Artifact gate. Runs against the combined and per-library zips as published — never against the
 // staging directory — so what it proves is what a consumer downloads: an
 // http_archive consumer expands the combined zip, a SwiftPM `binaryTarget`
 // expands one per-framework zip, and both must find the same frameworks with
@@ -202,7 +202,7 @@ async function main(argv: string[]): Promise<void> {
         'PROVENANCE.md',
         ...libraries.map((l) => `${l}.xcframework`),
       ].sort().join(' '),
-    'combined zip root holds the three xcframeworks, COPYING.LGPLv2.1, PROVENANCE.md',
+    'combined zip root holds every xcframework, COPYING.LGPLv2.1, PROVENANCE.md',
   )
 
   for (const library of libraries) {
