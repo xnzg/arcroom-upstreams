@@ -1,7 +1,7 @@
 {
   "tasks": {
-    "ffmpeg-build": "deno run --allow-net=ffmpeg.org --allow-read --allow-write --allow-env=TMPDIR,PATH --allow-run=bash,make,tar,otool,install_name_tool,codesign,clang,zip,ditto tools/ffmpeg/build.ts",
-    "ffmpeg-verify": "deno run --allow-read --allow-write --allow-env=TMPDIR --allow-run=ditto,plutil,otool,file,codesign,clang,diff tools/ffmpeg/verify.ts",
+    "ffmpeg-build": "deno run --allow-net=ffmpeg.org --allow-read --allow-write --allow-env=TMPDIR,PATH --allow-run=bash,make,patch,tar,otool,install_name_tool,codesign,clang,xcrun,xcodebuild,zip,ditto tools/ffmpeg/build.ts",
+    "ffmpeg-verify": "deno run --allow-read --allow-write --allow-env=TMPDIR --allow-run=ditto,plutil,otool,file,codesign,clang,xcrun,diff tools/ffmpeg/verify.ts",
     "libsmb2-build": "deno run --allow-net=github.com,codeload.github.com --allow-read --allow-write --allow-env=TMPDIR,PATH --allow-run=tar,xcrun,zip,ditto,xcodebuild tools/libsmb2/build.ts",
     "libsmb2-verify": "deno run --allow-read --allow-write --allow-env=TMPDIR --allow-run=ditto,plutil,lipo,ar,nm,xcrun,diff,otool,tar tools/libsmb2/verify.ts"
   },

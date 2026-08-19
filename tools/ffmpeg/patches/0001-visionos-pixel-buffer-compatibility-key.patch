@@ -1,0 +1,23 @@
+visionOS has neither OpenGL nor OpenGL ES, so both arms of this fork name a key
+the XROS SDK marks API_UNAVAILABLE(visionos) and libavcodec/videotoolbox.c fails
+to compile outright. TARGET_OS_IPHONE is 1 on visionOS, which is what steers it
+into the OpenGL ES arm. Metal is that platform's graphics interop and
+kCVPixelBufferMetalCompatibilityKey is available there, so the new arm states
+the same intent in the vocabulary the platform has.
+
+Not upstreamed as of ffmpeg 8.1.2. Every other platform preprocesses to exactly
+the code it did before: TARGET_OS_VISION is 0 on macOS, iOS and tvOS.
+
+--- a/libavcodec/videotoolbox.c
++++ b/libavcodec/videotoolbox.c
+@@ -816,7 +816,9 @@
+     CFDictionarySetValue(buffer_attributes, kCVPixelBufferIOSurfacePropertiesKey, io_surface_properties);
+     CFDictionarySetValue(buffer_attributes, kCVPixelBufferWidthKey, w);
+     CFDictionarySetValue(buffer_attributes, kCVPixelBufferHeightKey, h);
+-#if TARGET_OS_IPHONE
++#if TARGET_OS_VISION
++    CFDictionarySetValue(buffer_attributes, kCVPixelBufferMetalCompatibilityKey, kCFBooleanTrue);
++#elif TARGET_OS_IPHONE
+     CFDictionarySetValue(buffer_attributes, kCVPixelBufferOpenGLESCompatibilityKey, kCFBooleanTrue);
+ #else
+     CFDictionarySetValue(buffer_attributes, kCVPixelBufferIOSurfaceOpenGLTextureCompatibilityKey, kCFBooleanTrue);

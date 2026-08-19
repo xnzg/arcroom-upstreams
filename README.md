@@ -37,10 +37,9 @@ An application distributor must still carry the required notice and provide
 its object files or an equivalent relinking mechanism; these assets do not by
 themselves discharge that distributor's LGPL obligations.
 
-This one-slice platform set deliberately matches the ffmpeg artifact below.
-The earlier plan said libsmb2 would cover all Apple platforms, but ffmpeg does
-not yet do so; additional slices belong in a later coordinated artifact
-revision.
+This one-slice platform set no longer matches the ffmpeg artifact below, which
+now carries macOS, iOS and visionOS slices. libsmb2 owes the same widening; it
+is a separate artifact revision and has not been cut.
 
 Corresponding source and the complete build configuration are recorded in
 [`PROVENANCE-libsmb2.md`](PROVENANCE-libsmb2.md). The source tag resolves to
@@ -48,25 +47,48 @@ commit `d67e213a5c4e7e4969fd81f0b95e4ca5831fbba1`; no source is modified.
 
 ### ffmpeg 8.1.2
 
-Release tag `ffmpeg/8.1.2-arcroom.2` carries five frameworks — `libavutil`,
-`libswresample`, `libswscale`, `libavcodec`, and `libavformat` — for macOS
-arm64. Its explicit allowlist retains Arcroom's audio ladder and adds Matroska
-and ISO-BMFF demuxing, H.264/HEVC decoding, VideoToolbox acceleration and
-encoding, and text-subtitle decoding for the standalone importer experiment.
-There are no muxers, filters, command-line tools, GPL, version-3, or nonfree
-components.
+Release tag `ffmpeg/8.1.2-arcroom.4` carries five frameworks — `libavutil`,
+`libswresample`, `libswscale`, `libavcodec`, and `libavformat` — each an
+XCFramework with five arm64 slices:
+
+| LibraryIdentifier | SDK | deployment target |
+| --- | --- | --- |
+| `macos-arm64` | `macosx` | macOS 15.4 |
+| `ios-arm64` | `iphoneos` | iOS 18.4 |
+| `ios-arm64-simulator` | `iphonesimulator` | iOS 18.4 |
+| `xros-arm64` | `xros` | visionOS 26.0 |
+| `xros-arm64-simulator` | `xrsimulator` | visionOS 26.0 |
+
+There is no x86_64 anywhere and no tvOS: Arcroom's TV shell has no write path
+and never links these frameworks. The deployment floors are Arcroom's, from its
+`package.yml`.
+
+The explicit allowlist retains Arcroom's audio ladder and adds Matroska and
+ISO-BMFF demuxing, H.264/HEVC decoding, VideoToolbox acceleration and encoding,
+and text-subtitle decoding for the standalone importer experiment. There are no
+muxers, filters, command-line tools, GPL, version-3, or nonfree components.
 
 Assets per release:
 
-- `ffmpeg-<version>-macos-arm64.zip` — the combined artifact: all five
+- `ffmpeg-<version>-apple-arm64.zip` — the combined artifact: all five
   xcframeworks plus `COPYING.LGPLv2.1` and `PROVENANCE.md`. This is what the
   monorepo's Bazel build fetches.
-- `lib<name>-<version>-macos-arm64.zip` — one zip per xcframework, laid out for
+- `lib<name>-<version>-apple-arm64.zip` — one zip per xcframework, laid out for
   SwiftPM `binaryTarget` consumption (the `.xcframework` sits at the zip root).
 
 Every framework's install name is a flat `@rpath/<name>`, and each links its
 siblings by the same flat name, so a Bazel `_solib_*` directory and an app
-bundle's `Frameworks` directory both resolve them.
+bundle's `Frameworks` directory both resolve them — and one binary satisfies
+both the versioned macOS bundle and the flat bundle every other platform
+requires. Only the macOS slice carries `Versions/A`; a versioned bundle on iOS
+or visionOS is rejected when an app embeds it.
+
+Each slice states its platform as an explicit LLVM triple
+(`--extra-cflags=-target arm64-apple-ios18.4-simulator …`) rather than a
+version-min flag, and the build and the verifier both assert the resulting
+`LC_BUILD_VERSION` platform and `minos`. ffmpeg's `configure` is unreliable at
+picking a simulator target on its own, and a device binary filed as a simulator
+slice passes every structural check.
 
 ## Corresponding source
 
@@ -80,8 +102,14 @@ bundle's `Frameworks` directory both resolve them.
   configure flags — is checked in here as [PROVENANCE.md](PROVENANCE.md),
   byte-for-byte as it ships inside `ffmpeg/8.1.2-arcroom.2`.
 
-No ffmpeg sources are modified; the binaries are a straight build of the
-unmodified upstream tarball with the configuration recorded above.
+One patch is applied, to every slice, from
+[`tools/ffmpeg/patches/`](tools/ffmpeg/patches):
+`0001-visionos-pixel-buffer-compatibility-key.patch` gives
+`libavcodec/videotoolbox.c` a visionOS arm, because `TARGET_OS_IPHONE` is 1
+there and both existing arms name a CoreVideo key the XROS SDK marks
+`API_UNAVAILABLE(visionos)`. Every other platform preprocesses to exactly the
+code it did before. Each patch carries its rationale above its diff and the
+artifact's `PROVENANCE.md` names the series.
 
 ## Reproducing the build
 
@@ -99,16 +127,18 @@ deno task libsmb2-verify dist-libsmb2  # verifies archive, module, and link
 
 `ffmpeg-build` accepts `--out <dir>` for the output directory, `--scratch <dir>`
 for the build tree (defaults under `$TMPDIR`; the source and object files exceed
-a gigabyte), and `--keep` to leave that tree in place between runs. Under the
+a gigabyte), `--only <slice-id>[,…]` to build a subset while iterating, and
+`--keep` to leave that tree in place between runs. Under the
 hood the two tasks are `deno run tools/ffmpeg/{build,verify}.ts` with an explicit
 permission set; run them directly if you would rather grant your own.
 
 `ffmpeg-verify` is the artifact gate. It expands the combined and per-library zips exactly as a
-consumer does and asserts the xcframework structure, `Info.plist` contents,
-`@rpath` install names, that nothing links outside `/usr/lib` and
+consumer does and asserts, for every slice, the xcframework structure and bundle
+layout, `Info.plist` contents, the `LC_BUILD_VERSION` platform and deployment
+target, `@rpath` install names, that nothing links outside `/usr/lib` and
 `/System/Library`, that the code signatures are valid, that every module still
-imports under `clang -fmodules`, and that each per-framework zip matches the
-combined one.
+imports under `clang -fmodules` against that slice's own SDK, and that each
+per-framework zip matches the combined one.
 
 The build is not bit-for-bit reproducible: timestamps and ad-hoc code signatures
 differ per run, so a rebuild will not reproduce a published sha256. What it
