@@ -10,11 +10,15 @@ import { basename, join, resolve } from '../lib/path.ts'
 import { capture, run } from '../lib/proc.ts'
 import {
   artifactSuffix,
+  buildVersion,
   frameworkVersion,
   installName,
+  isVersionedLayout,
   libraries,
-  minimumMacOSVersion,
   sha256,
+  Slice,
+  slices,
+  triple,
   upstreamVersion,
 } from './build.ts'
 
@@ -40,9 +44,10 @@ async function entryNames(dir: string): Promise<string[]> {
   return names.sort()
 }
 
-async function plistValue(plist: string, key: string): Promise<string> {
-  return (await capture(['plutil', '-extract', key, 'raw', '-o', '-', plist]))
-    .trim()
+async function plist(path: string): Promise<Record<string, unknown>> {
+  return JSON.parse(
+    await capture(['plutil', '-convert', 'json', '-o', '-', path]),
+  )
 }
 
 async function expand(zip: string, into: string): Promise<string> {
@@ -51,70 +56,127 @@ async function expand(zip: string, into: string): Promise<string> {
   return into
 }
 
-async function verifyFramework(xcframework: string, library: string) {
-  const rootPlist = join(xcframework, 'Info.plist')
-  check(await exists(rootPlist), `${library}: xcframework Info.plist`)
+async function sdkPath(slice: Slice): Promise<string> {
+  return (await capture(['xcrun', '--sdk', slice.sdk, '--show-sdk-path']))
+    .trim()
+}
+
+async function verifySlice(
+  xcframework: string,
+  library: string,
+  slice: Slice,
+  entry: Record<string, unknown>,
+): Promise<void> {
+  const label = `${library} ${slice.id}`
   check(
-    await plistValue(rootPlist, 'AvailableLibraries.0.LibraryIdentifier') ===
-      'macos-arm64',
-    `${library}: LibraryIdentifier macos-arm64`,
+    JSON.stringify(entry['SupportedArchitectures']) === '["arm64"]',
+    `${label}: SupportedArchitectures arm64`,
   )
   check(
-    await plistValue(
-      rootPlist,
-      'AvailableLibraries.0.SupportedArchitectures.0',
-    ) ===
-      'arm64',
-    `${library}: SupportedArchitectures arm64`,
+    entry['SupportedPlatform'] === slice.supportedPlatform,
+    `${label}: SupportedPlatform ${slice.supportedPlatform}`,
+  )
+  check(
+    (entry['SupportedPlatformVariant'] ?? null) ===
+      slice.supportedPlatformVariant,
+    `${label}: SupportedPlatformVariant ${slice.supportedPlatformVariant}`,
   )
 
-  const bundle = join(xcframework, 'macos-arm64', `${library}.framework`)
-  const versioned = join(bundle, 'Versions', frameworkVersion)
+  const bundle = join(xcframework, slice.id, `${library}.framework`)
+  const versioned = isVersionedLayout(slice)
+    ? join(bundle, 'Versions', frameworkVersion)
+    : bundle
   const binary = join(versioned, library)
-  check(await exists(binary), `${library}: Versions/A/${library}`)
-  for (const entry of ['Headers', 'Modules', 'Resources', library]) {
-    const link = join(bundle, entry)
-    const stat = await Deno.lstat(link).catch(() => null)
+  check(await exists(binary), `${label}: ${library} binary`)
+  check(
+    entry['BinaryPath'] ===
+      (isVersionedLayout(slice)
+        ? `${library}.framework/Versions/${frameworkVersion}/${library}`
+        : `${library}.framework/${library}`),
+    `${label}: BinaryPath ${entry['BinaryPath']}`,
+  )
+
+  if (isVersionedLayout(slice)) {
+    for (const name of ['Headers', 'Modules', 'Resources', library]) {
+      const stat = await Deno.lstat(join(bundle, name)).catch(() => null)
+      check(
+        stat?.isSymlink === true,
+        `${label}: top-level ${name} is a symlink`,
+      )
+    }
     check(
-      stat?.isSymlink === true,
-      `${library}: top-level ${entry} is a symlink`,
+      (await Deno.readLink(join(bundle, 'Versions', 'Current')).catch(() =>
+        ''
+      )) === frameworkVersion,
+      `${label}: Versions/Current -> ${frameworkVersion}`,
+    )
+  } else {
+    // A versioned bundle is rejected when an iOS or visionOS app embeds it, and
+    // the rejection lands at submission rather than at build.
+    check(
+      !await exists(join(bundle, 'Versions')),
+      `${label}: flat bundle, no Versions directory`,
     )
   }
   check(
-    (await Deno.readLink(join(bundle, 'Versions', 'Current')).catch(() =>
-      ''
-    )) ===
-      frameworkVersion,
-    `${library}: Versions/Current -> ${frameworkVersion}`,
-  )
-  check(
     await exists(join(versioned, 'Modules', 'module.modulemap')),
-    `${library}: module.modulemap`,
+    `${label}: module.modulemap`,
   )
 
-  const plist = join(versioned, 'Resources', 'Info.plist')
+  const info = await plist(
+    join(
+      isVersionedLayout(slice) ? join(versioned, 'Resources') : versioned,
+      'Info.plist',
+    ),
+  )
+  check(info['CFBundleExecutable'] === library, `${label}: CFBundleExecutable`)
   check(
-    await plistValue(plist, 'CFBundleExecutable') === library,
-    `${library}: CFBundleExecutable`,
+    info['CFBundleIdentifier'] === `org.ffmpeg.${library}`,
+    `${label}: CFBundleIdentifier`,
   )
   check(
-    await plistValue(plist, 'CFBundleIdentifier') === `org.ffmpeg.${library}`,
-    `${library}: CFBundleIdentifier`,
+    info['CFBundleShortVersionString'] === upstreamVersion,
+    `${label}: CFBundleShortVersionString ${upstreamVersion}`,
   )
   check(
-    await plistValue(plist, 'CFBundleShortVersionString') === upstreamVersion,
-    `${library}: CFBundleShortVersionString ${upstreamVersion}`,
+    JSON.stringify(info['CFBundleSupportedPlatforms']) ===
+      JSON.stringify([slice.bundlePlatform]),
+    `${label}: CFBundleSupportedPlatforms ${slice.bundlePlatform}`,
+  )
+  const minimumKey = slice.supportedPlatform === 'macos'
+    ? 'LSMinimumSystemVersion'
+    : 'MinimumOSVersion'
+  check(
+    info[minimumKey] === slice.minVersion,
+    `${label}: ${minimumKey} ${slice.minVersion}`,
+  )
+
+  // The load command, not the SDK the compiler saw, is what decides which
+  // device a slice is loadable on and where xcodebuild files it. A device-triple
+  // binary sitting in a simulator slice passes every structural check above.
+  const { platform, minos } = await buildVersion(binary)
+  const platformCodes: Record<string, string> = {
+    'macos-arm64': '1',
+    'ios-arm64': '2',
+    'ios-arm64-simulator': '7',
+    'xros-arm64': '11',
+    'xros-arm64-simulator': '12',
+  }
+  check(
+    platform === platformCodes[slice.id],
+    `${label}: LC_BUILD_VERSION platform ${platform} (want ${
+      platformCodes[slice.id]
+    })`,
   )
   check(
-    await plistValue(plist, 'LSMinimumSystemVersion') === minimumMacOSVersion,
-    `${library}: LSMinimumSystemVersion ${minimumMacOSVersion}`,
+    minos === slice.minVersion,
+    `${label}: LC_BUILD_VERSION minos ${minos} (want ${slice.minVersion})`,
   )
 
   check(
     (await capture(['otool', '-D', binary])).trim().split('\n').at(-1)
-      ?.trim() ===
-      installName(library),
-    `${library}: install name ${installName(library)}`,
+      ?.trim() === installName(library),
+    `${label}: install name ${installName(library)}`,
   )
 
   const dependencies = (await capture(['otool', '-L', binary])).split('\n')
@@ -126,7 +188,7 @@ async function verifyFramework(xcframework: string, library: string) {
     if (sibling) {
       check(
         dependency === installName(sibling),
-        `${library}: links ${sibling} as ${
+        `${label}: links ${sibling} as ${
           installName(sibling)
         } (got ${dependency})`,
       )
@@ -135,24 +197,52 @@ async function verifyFramework(xcframework: string, library: string) {
     check(
       dependency.startsWith('/usr/lib/') ||
         dependency.startsWith('/System/Library/'),
-      `${library}: non-system dependency ${dependency}`,
+      `${label}: non-system dependency ${dependency}`,
     )
   }
 
   check(
     (await capture(['file', '-b', binary])).includes('arm64'),
-    `${library}: arm64 Mach-O`,
+    `${label}: arm64 Mach-O`,
   )
   const signed = await new Deno.Command('codesign', {
     args: ['--verify', '--deep', '--strict', bundle],
     stdout: 'null',
     stderr: 'null',
   }).output()
-  check(signed.success, `${library}: code signature valid`)
+  check(signed.success, `${label}: code signature valid`)
 }
 
-async function verifyModules(scratch: string, xcframeworkRoot: string) {
-  const flat = join(scratch, 'flat')
+async function verifyFramework(
+  xcframework: string,
+  library: string,
+): Promise<void> {
+  const rootPlist = join(xcframework, 'Info.plist')
+  check(await exists(rootPlist), `${library}: xcframework Info.plist`)
+  const available = (await plist(rootPlist))['AvailableLibraries'] as Record<
+    string,
+    unknown
+  >[]
+  check(
+    available.length === slices.length,
+    `${library}: ${slices.length} slices (got ${available.length})`,
+  )
+  for (const slice of slices) {
+    const entry = available.find((one) => one['LibraryIdentifier'] === slice.id)
+    if (entry === undefined) {
+      check(false, `${library}: LibraryIdentifier ${slice.id}`)
+      continue
+    }
+    await verifySlice(xcframework, library, slice, entry)
+  }
+}
+
+async function verifyModules(
+  scratch: string,
+  xcframeworkRoot: string,
+  slice: Slice,
+): Promise<void> {
+  const flat = join(scratch, 'flat', slice.id)
   await Deno.remove(flat, { recursive: true }).catch(() => {})
   await Deno.mkdir(flat, { recursive: true })
   for (const library of libraries) {
@@ -160,13 +250,13 @@ async function verifyModules(scratch: string, xcframeworkRoot: string) {
       join(
         xcframeworkRoot,
         `${library}.xcframework`,
-        'macos-arm64',
+        slice.id,
         `${library}.framework`,
       ),
       join(flat, `${library}.framework`),
     )
   }
-  const probe = join(scratch, 'probe.c')
+  const probe = join(scratch, `probe-${slice.id}.c`)
   await Deno.writeTextFile(
     probe,
     libraries.map((library) => `#include <${library}/${library}.h>`).join(
@@ -177,15 +267,22 @@ async function verifyModules(scratch: string, xcframeworkRoot: string) {
   const compiled = await new Deno.Command('clang', {
     args: [
       '-fsyntax-only',
+      '-target',
+      triple(slice),
+      '-isysroot',
+      await sdkPath(slice),
       '-fmodules',
-      `-fmodules-cache-path=${join(scratch, 'module-cache')}`,
+      `-fmodules-cache-path=${join(scratch, `module-cache-${slice.id}`)}`,
       `-F${flat}`,
       probe,
     ],
     stdout: 'inherit',
     stderr: 'inherit',
   }).output()
-  check(compiled.success, 'every module imports from the published layout')
+  check(
+    compiled.success,
+    `${slice.id}: every module imports from the published layout`,
+  )
 }
 
 async function main(argv: string[]): Promise<void> {
@@ -208,7 +305,9 @@ async function main(argv: string[]): Promise<void> {
   for (const library of libraries) {
     await verifyFramework(join(combined, `${library}.xcframework`), library)
   }
-  await verifyModules(scratch, combined)
+  for (const slice of slices) {
+    await verifyModules(scratch, combined, slice)
+  }
 
   for (const library of libraries) {
     const zip = join(dist, `${library}-${artifactSuffix}.zip`)

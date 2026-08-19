@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   build:
-    # macos-latest is Apple silicon; the artifact is macOS arm64 only.
+    # macos-latest is Apple silicon; every slice of the artifact is arm64.
     runs-on: macos-latest
     timeout-minutes: 120
     steps:
@@ -31,25 +31,12 @@ jobs:
       - name: Build the artifact
         run: deno task ffmpeg-build --out dist-ffmpeg
 
-      # Independent of the build's own staging checks: this expands the four
-      # zips as a consumer would and asserts structure, install names, plists,
-      # signatures, and module importability.
+      # Independent of the build's own staging checks: this expands the six
+      # zips as a consumer would and asserts, for every slice, the structure,
+      # install names, plists, LC_BUILD_VERSION platform, signatures, and module
+      # importability.
       - name: Verify the artifact
         run: deno task ffmpeg-verify dist-ffmpeg
-
-      - name: Report install names
-        run: |
-          set -euo pipefail
-          rm -rf dist-ffmpeg/expanded
-          mkdir -p dist-ffmpeg/expanded
-          ditto -x -k dist-ffmpeg/ffmpeg-*-macos-arm64.zip dist-ffmpeg/expanded
-          for lib in libavutil libswresample libavcodec; do
-            binary="dist-ffmpeg/expanded/$lib.xcframework/macos-arm64/$lib.framework/Versions/A/$lib"
-            echo "== $lib"
-            otool -D "$binary"
-            otool -L "$binary"
-          done
-          rm -rf dist-ffmpeg/expanded
 
       - name: Checksums
         working-directory: dist-ffmpeg
@@ -57,7 +44,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ffmpeg-macos-arm64
+          name: ffmpeg-apple-arm64
           path: dist-ffmpeg/*
           if-no-files-found: error
           retention-days: 14
