@@ -19,7 +19,7 @@ export const upstreamURL =
 export const upstreamSHA256 =
   '464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c'
 
-export const artifactRevision = 4
+export const artifactRevision = 5
 export const artifactSuffix =
   `${upstreamVersion}-arcroom.${artifactRevision}-apple-arm64`
 export const releaseTag =
@@ -159,7 +159,7 @@ const decoders = [
   'pcm_vidc',
 ]
 
-const encoders = ['aac', 'eac3', 'h264_videotoolbox']
+const encoders = ['aac', 'eac3', 'h264_videotoolbox', 'movtext']
 
 const parsers = [
   'aac',
@@ -174,7 +174,13 @@ const parsers = [
   'hevc',
 ]
 
-const demuxers = ['matroska', 'mov']
+const demuxers = ['matroska', 'mov', 'sup', 'webvtt']
+
+// Arcroom writes its own fMP4 for the publish path, where it needs byte-level
+// control of fragment boundaries. These muxers serve the two paths that are
+// plain remuxes instead: the extras.mkv archive, and export. `mp4` is movenc,
+// which also answers for .mov and .m4a.
+const muxers = ['matroska', 'mp4']
 const protocols = ['file']
 const hwaccels = ['h264_videotoolbox', 'hevc_videotoolbox']
 
@@ -252,6 +258,7 @@ export function configureFlags(slice: Slice, sdkPath: string): string[] {
     `--enable-encoder=${encoders.join(',')}`,
     `--enable-parser=${parsers.join(',')}`,
     `--enable-demuxer=${demuxers.join(',')}`,
+    `--enable-muxer=${muxers.join(',')}`,
     `--enable-protocol=${protocols.join(',')}`,
     `--enable-hwaccel=${hwaccels.join(',')}`,
   )
