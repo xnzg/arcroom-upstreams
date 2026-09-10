@@ -1,0 +1,48 @@
+name: libass
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: libass-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.9.5
+
+      - run: deno fmt --check
+      - run: deno lint
+      - run: deno check tools/libass/build.ts tools/libass/verify.ts
+
+      - name: Build the artifact
+        run: deno task libass-build --out dist-libass
+
+      - name: Verify the artifact
+        run: deno task libass-verify dist-libass
+
+      - name: Checksums
+        working-directory: dist-libass
+        run: shasum -a 256 *.zip *-source.tar.* | tee SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: libass-macos-arm64
+          path: |
+            dist-libass/*.zip
+            dist-libass/*-source.tar.*
+            dist-libass/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

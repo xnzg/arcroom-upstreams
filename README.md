@@ -2,6 +2,7 @@
 
 [![ffmpeg](https://github.com/xnzg/arcroom-upstreams/actions/workflows/ffmpeg.yml/badge.svg)](https://github.com/xnzg/arcroom-upstreams/actions/workflows/ffmpeg.yml)
 [![libsmb2](https://github.com/xnzg/arcroom-upstreams/actions/workflows/libsmb2.yml/badge.svg)](https://github.com/xnzg/arcroom-upstreams/actions/workflows/libsmb2.yml)
+[![libass](https://github.com/xnzg/arcroom-upstreams/actions/workflows/libass.yml/badge.svg)](https://github.com/xnzg/arcroom-upstreams/actions/workflows/libass.yml)
 
 Pinned Apple-platform builds of LGPL-2.1 C libraries consumed by the
 [Arcroom](https://github.com/wuhu-labs/wuhu) app, and the scripts that produce
@@ -44,6 +45,28 @@ is a separate artifact revision and has not been cut.
 Corresponding source and the complete build configuration are recorded in
 [`PROVENANCE-libsmb2.md`](PROVENANCE-libsmb2.md). The source tag resolves to
 commit `d67e213a5c4e7e4969fd81f0b95e4ca5831fbba1`; no source is modified.
+
+### libass 0.17.5
+
+Release tag `libass/0.17.5-arcroom.1` carries one static `libass.xcframework`
+for macOS arm64: libass 0.17.5 with FreeType 2.14.3, HarfBuzz 14.2.1, FriBidi
+1.0.16 and libunibreak 6.1 folded into a single `libass.a`, the CoreText font
+provider enabled and fontconfig disabled. The public headers sit under `ass/`
+with an umbrella `libass.h` and a `CASS` module map whose link directives pull
+in libc++, libiconv, CoreText, CoreGraphics and CoreFoundation.
+
+Assets:
+
+- `libass-0.17.5-arcroom.1-macos-arm64.zip` — the XCFramework, every upstream
+  license, and generated `PROVENANCE.md`, for a Bazel
+  `apple_static_xcframework_import`.
+- `CASS-0.17.5-arcroom.1-macos-arm64.zip` — the same XCFramework alone at the
+  archive root, for a SwiftPM `binaryTarget`.
+- `<name>-<version>-source.tar.*` — the five exact pinned upstream tarballs.
+
+FriBidi is LGPL-2.1 and statically linked, so the libsmb2 relinking caveat
+applies to it; the other four are ISC, FTL, MIT and zlib. Build configuration
+and hashes are in [`PROVENANCE-libass.md`](PROVENANCE-libass.md).
 
 ### ffmpeg 8.1.2
 
