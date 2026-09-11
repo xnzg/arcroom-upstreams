@@ -3,12 +3,15 @@ import { capture, run } from '../lib/proc.ts'
 import {
   artifactName,
   linkedLibraries,
-  minimumMacOSVersion,
   moduleName,
   publicHeaders,
+  sdkPath,
   sha256,
+  Slice,
+  slices,
   sourceArtifactName,
   swiftPMArtifactName,
+  triple,
   upstreams,
 } from './build.ts'
 
@@ -34,9 +37,14 @@ async function entryNames(dir: string): Promise<string[]> {
   return names.sort()
 }
 
-async function plistValue(plist: string, key: string): Promise<string> {
-  return (await capture(['plutil', '-extract', key, 'raw', '-o', '-', plist]))
-    .trim()
+async function plistValue(plist: string, key: string): Promise<string | null> {
+  const result = await new Deno.Command('plutil', {
+    args: ['-extract', key, 'raw', '-o', '-', plist],
+    stdout: 'piped',
+    stderr: 'null',
+  }).output()
+  if (!result.success) return null
+  return new TextDecoder().decode(result.stdout).trim()
 }
 
 function sameStrings(actual: string[], expected: string[]): boolean {
@@ -58,8 +66,12 @@ function printSetDifference(actual: string[], expected: string[]): void {
   }
 }
 
-async function verifyModule(scratch: string, headers: string): Promise<void> {
-  const probe = join(scratch, 'module-probe.m')
+async function verifyModule(
+  scratch: string,
+  headers: string,
+  slice: Slice,
+): Promise<void> {
+  const probe = join(scratch, `module-probe-${slice.id}.m`)
   await Deno.writeTextFile(
     probe,
     `@import ${moduleName};\nint main(void) { return 0; }\n`,
@@ -67,11 +79,15 @@ async function verifyModule(scratch: string, headers: string): Promise<void> {
   const compiled = await new Deno.Command('xcrun', {
     args: [
       '--sdk',
-      'macosx',
+      slice.sdk,
       'clang',
       '-fsyntax-only',
+      '-target',
+      triple(slice),
+      '-isysroot',
+      await sdkPath(slice),
       '-fmodules',
-      `-fmodules-cache-path=${join(scratch, 'module-cache')}`,
+      `-fmodules-cache-path=${join(scratch, `module-cache-${slice.id}`)}`,
       `-fmodule-map-file=${join(headers, 'module.modulemap')}`,
       `-I${headers}`,
       probe,
@@ -79,22 +95,18 @@ async function verifyModule(scratch: string, headers: string): Promise<void> {
     stdout: 'inherit',
     stderr: 'inherit',
   }).output()
-  check(compiled.success, `${moduleName}: module imports from published layout`)
+  check(
+    compiled.success,
+    `${slice.id}: ${moduleName} imports from published layout`,
+  )
 }
 
 // The probe renders one positioned, coloured line through the CoreText
 // provider, so it proves shaping, rasterising and font selection rather than
-// just symbol resolution.
-async function verifyLink(
-  scratch: string,
-  headers: string,
-  archive: string,
-): Promise<void> {
-  const probe = join(scratch, 'link-probe.c')
-  const executable = join(scratch, 'link-probe')
-  await Deno.writeTextFile(
-    probe,
-    `#include <libass.h>
+// just symbol resolution. Every slice links it against its own SDK; only the
+// macOS one can be executed on the builder, and a slice that links but whose
+// CoreText provider is missing would still fail the symbol checks above.
+const probeSource = `#include <libass.h>
 #include <stdio.h>
 #include <string.h>
 static const char script[] =
@@ -106,6 +118,7 @@ static const char script[] =
 int main(void) {
   ASS_Library *library = ass_library_init();
   ASS_Renderer *renderer = ass_renderer_init(library);
+  ass_set_extract_fonts(library, 1);
   ass_set_frame_size(renderer, 640, 360);
   ass_set_fonts(renderer, NULL, "sans-serif", ASS_FONTPROVIDER_AUTODETECT, NULL, 1);
   ASS_Track *track = ass_read_memory(library, (char *)script, strlen(script), NULL);
@@ -119,20 +132,26 @@ int main(void) {
   ass_library_done(library);
   return count > 0 ? 0 : 1;
 }
-`,
-  )
-  const sdk = (await capture(['xcrun', '--sdk', 'macosx', '--show-sdk-path']))
-    .trim()
+`
+
+async function verifyLink(
+  scratch: string,
+  headers: string,
+  archive: string,
+  slice: Slice,
+): Promise<void> {
+  const probe = join(scratch, `link-probe-${slice.id}.c`)
+  const executable = join(scratch, `link-probe-${slice.id}`)
+  await Deno.writeTextFile(probe, probeSource)
   const linked = await new Deno.Command('xcrun', {
     args: [
       '--sdk',
-      'macosx',
+      slice.sdk,
       'clang',
-      '-arch',
-      'arm64',
-      `-mmacosx-version-min=${minimumMacOSVersion}`,
+      '-target',
+      triple(slice),
       '-isysroot',
-      sdk,
+      await sdkPath(slice),
       `-I${headers}`,
       probe,
       `-Wl,-force_load,${archive}`,
@@ -150,37 +169,43 @@ int main(void) {
     stdout: 'inherit',
     stderr: 'inherit',
   }).output()
-  check(linked.success, 'force-loaded static archive links successfully')
+  check(linked.success, `${slice.id}: force-loaded static archive links`)
   if (!linked.success) return
-
-  const rendered = await new Deno.Command(executable, {
-    stdout: 'inherit',
-    stderr: 'inherit',
-  }).output()
-  check(rendered.success, 'probe renders a styled line through CoreText fonts')
 
   const actualLibraries = (await capture(['otool', '-L', executable]))
     .split('\n')
     .slice(1)
-    .map((line) => line.trim().split(/\s+/)[0] ?? '')
-    .filter((path) => path !== '')
+    .map((line) => basename(line.trim().split(/\s+/)[0] ?? ''))
+    .filter((name) => name !== '')
     .sort()
+  const expected = linkedLibraries.toSorted()
   check(
-    sameStrings(actualLibraries, linkedLibraries.toSorted()),
-    'force-loaded archive links exactly the allowed Apple system libraries',
+    sameStrings(actualLibraries, expected),
+    `${slice.id}: links exactly the allowed Apple system libraries`,
   )
-  if (!sameStrings(actualLibraries, linkedLibraries.toSorted())) {
-    printSetDifference(actualLibraries, linkedLibraries.toSorted())
+  if (!sameStrings(actualLibraries, expected)) {
+    printSetDifference(actualLibraries, expected)
   }
+
+  if (slice.id !== 'macos-arm64') return
+  const rendered = await new Deno.Command(executable, {
+    stdout: 'inherit',
+    stderr: 'inherit',
+  }).output()
+  check(
+    rendered.success,
+    `${slice.id}: probe renders a styled line through CoreText fonts`,
+  )
 }
 
-async function verifyDeploymentTargets(
+async function verifyDeploymentTarget(
   scratch: string,
   archive: string,
+  slice: Slice,
 ): Promise<void> {
-  const objects = join(scratch, 'archive-objects')
+  const objects = join(scratch, `objects-${slice.id}`)
   await Deno.mkdir(objects, { recursive: true })
-  await run(['ar', '-x', archive], objects)
+  await run(['xcrun', 'ar', '-x', archive], objects)
   const invalid: string[] = []
   const members = (await entryNames(objects)).filter((name) =>
     name.endsWith('.o')
@@ -193,17 +218,78 @@ async function verifyDeploymentTargets(
       join(objects, object),
     ])
     if (
-      !build.includes('platform MACOS') ||
-      !build.includes(`minos ${minimumMacOSVersion}`)
+      !build.includes(`platform ${slice.vtoolPlatform}`) ||
+      !build.includes(`minos ${slice.minVersion}`)
     ) {
       invalid.push(object)
     }
   }
   check(
     members.length > 0 && invalid.length === 0,
-    `all ${members.length} objects target macOS ${minimumMacOSVersion}`,
+    `${slice.id}: all ${members.length} objects are ${slice.vtoolPlatform} minos ${slice.minVersion}`,
   )
   for (const object of invalid) console.error(`  invalid target: ${object}`)
+  await Deno.remove(objects, { recursive: true })
+}
+
+const requiredSymbols = [
+  '_ass_library_init',
+  '_ass_renderer_init',
+  '_ass_new_track',
+  '_ass_process_codec_private',
+  '_ass_process_chunk',
+  '_ass_flush_events',
+  '_ass_set_extract_fonts',
+  '_ass_add_font',
+  '_ass_render_frame',
+  '_ass_set_fonts',
+  '_ass_coretext_add_provider',
+  '_hb_shape',
+  '_FT_Init_FreeType',
+  '_fribidi_get_bidi_types',
+  '_set_linebreaks_utf32',
+]
+
+async function verifySlice(
+  scratch: string,
+  xcframework: string,
+  slice: Slice,
+): Promise<void> {
+  const sliceDir = join(xcframework, slice.id)
+  const archive = join(sliceDir, 'libass.a')
+  const headers = join(sliceDir, 'Headers')
+  check(await exists(archive), `${slice.id}: static libass.a`)
+  if (!await exists(archive)) return
+  check(
+    (await capture(['lipo', '-archs', archive])).trim() === 'arm64',
+    `${slice.id}: archive contains exactly arm64`,
+  )
+  for (const header of publicHeaders) {
+    check(
+      await exists(join(headers, 'ass', header)),
+      `${slice.id}: public ass/${header}`,
+    )
+  }
+  check(
+    await exists(join(headers, 'libass.h')),
+    `${slice.id}: umbrella libass.h`,
+  )
+  check(
+    await exists(join(headers, 'module.modulemap')),
+    `${slice.id}: module.modulemap`,
+  )
+
+  const symbols = await capture(['nm', '-gU', archive])
+  const missing = requiredSymbols.filter((symbol) => !symbols.includes(symbol))
+  check(
+    missing.length === 0,
+    `${slice.id}: exports every required libass, CoreText, HarfBuzz, FreeType, FriBidi and libunibreak symbol`,
+  )
+  for (const symbol of missing) console.error(`  missing symbol: ${symbol}`)
+
+  await verifyDeploymentTarget(scratch, archive, slice)
+  await verifyModule(scratch, headers, slice)
+  await verifyLink(scratch, headers, archive, slice)
 }
 
 async function main(argv: string[]): Promise<void> {
@@ -244,61 +330,59 @@ async function main(argv: string[]): Promise<void> {
     const xcframework = join(expanded, 'libass.xcframework')
     const plist = join(xcframework, 'Info.plist')
     check(await exists(plist), 'xcframework Info.plist')
-    check(
-      await plistValue(plist, 'AvailableLibraries.0.LibraryIdentifier') ===
-        'macos-arm64',
-      'LibraryIdentifier macos-arm64',
-    )
-    check(
-      await plistValue(plist, 'AvailableLibraries.0.SupportedPlatform') ===
-        'macos',
-      'SupportedPlatform macos',
-    )
-    check(
-      await plistValue(plist, 'AvailableLibraries.0.LibraryPath') ===
-        'libass.a',
-      'LibraryPath libass.a',
-    )
-
-    const slice = join(xcframework, 'macos-arm64')
-    const archive = join(slice, 'libass.a')
-    const headers = join(slice, 'Headers')
-    check(await exists(archive), 'static libass.a')
-    check(
-      (await capture(['lipo', '-archs', archive])).trim() === 'arm64',
-      'archive contains exactly arm64',
-    )
-    for (const header of publicHeaders) {
-      check(await exists(join(headers, 'ass', header)), `public ass/${header}`)
+    const declared = new Map<string, number>()
+    for (let index = 0;; index++) {
+      const identifier = await plistValue(
+        plist,
+        `AvailableLibraries.${index}.LibraryIdentifier`,
+      )
+      if (identifier === null) break
+      declared.set(identifier, index)
     }
-    check(await exists(join(headers, 'libass.h')), 'umbrella libass.h')
-    check(await exists(join(headers, 'module.modulemap')), 'module.modulemap')
-
-    const symbols = await capture(['nm', '-gU', archive])
-    for (
-      const symbol of [
-        '_ass_library_init',
-        '_ass_renderer_init',
-        '_ass_new_track',
-        '_ass_process_codec_private',
-        '_ass_process_chunk',
-        '_ass_flush_events',
-        '_ass_add_font',
-        '_ass_render_frame',
-        '_ass_set_fonts',
-        '_ass_coretext_add_provider',
-        '_hb_shape',
-        '_FT_Init_FreeType',
-        '_fribidi_get_bidi_types',
-        '_set_linebreaks_utf32',
-      ]
+    check(
+      sameStrings(
+        [...declared.keys()].sort(),
+        slices.map((slice) => slice.id).sort(),
+      ),
+      'xcframework declares exactly the expected slices',
+    )
+    if (
+      !sameStrings(
+        [...declared.keys()].sort(),
+        slices.map((slice) => slice.id).sort(),
+      )
     ) {
-      check(symbols.includes(symbol), `exports ${symbol.slice(1)}`)
+      printSetDifference(
+        [...declared.keys()].sort(),
+        slices.map((slice) => slice.id).sort(),
+      )
     }
 
-    await verifyDeploymentTargets(scratch, archive)
-    await verifyModule(scratch, headers)
-    await verifyLink(scratch, headers, archive)
+    for (const slice of slices) {
+      const index = declared.get(slice.id)
+      if (index === undefined) {
+        check(false, `${slice.id}: declared in Info.plist`)
+        continue
+      }
+      const prefix = `AvailableLibraries.${index}`
+      check(
+        await plistValue(plist, `${prefix}.SupportedPlatform`) ===
+          slice.supportedPlatform,
+        `${slice.id}: SupportedPlatform ${slice.supportedPlatform}`,
+      )
+      check(
+        await plistValue(plist, `${prefix}.SupportedPlatformVariant`) ===
+          slice.supportedPlatformVariant,
+        `${slice.id}: SupportedPlatformVariant ${
+          slice.supportedPlatformVariant ?? 'absent'
+        }`,
+      )
+      check(
+        await plistValue(plist, `${prefix}.LibraryPath`) === 'libass.a',
+        `${slice.id}: LibraryPath libass.a`,
+      )
+      await verifySlice(scratch, xcframework, slice)
+    }
 
     const swiftPMZip = join(dist, swiftPMArtifactName)
     check(await exists(swiftPMZip), `${basename(swiftPMZip)} present`)

@@ -15,8 +15,10 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
-    timeout-minutes: 45
+    # The tvOS 26 and visionOS 26 floors need the Xcode the current image
+    # ships; this is the label the ffmpeg job already proves against.
+    runs-on: macos-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
@@ -39,7 +41,7 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: libass-macos-arm64
+          name: libass-apple-arm64
           path: |
             dist-libass/*.zip
             dist-libass/*-source.tar.*

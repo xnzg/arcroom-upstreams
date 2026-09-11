@@ -38,9 +38,10 @@ An application distributor must still carry the required notice and provide
 its object files or an equivalent relinking mechanism; these assets do not by
 themselves discharge that distributor's LGPL obligations.
 
-This one-slice platform set no longer matches the ffmpeg artifact below, which
-now carries macOS, iOS and visionOS slices. libsmb2 owes the same widening; it
-is a separate artifact revision and has not been cut.
+This one-slice platform set no longer matches the ffmpeg and libass artifacts
+below, which carry macOS, iOS, visionOS and (for libass) tvOS slices. libsmb2
+owes the same widening; it is a separate artifact revision and has not been
+cut.
 
 Corresponding source and the complete build configuration are recorded in
 [`PROVENANCE-libsmb2.md`](PROVENANCE-libsmb2.md). The source tag resolves to
@@ -48,19 +49,37 @@ commit `d67e213a5c4e7e4969fd81f0b95e4ca5831fbba1`; no source is modified.
 
 ### libass 0.17.5
 
-Release tag `libass/0.17.5-arcroom.1` carries one static `libass.xcframework`
-for macOS arm64: libass 0.17.5 with FreeType 2.14.3, HarfBuzz 14.2.1, FriBidi
-1.0.16 and libunibreak 6.1 folded into a single `libass.a`, the CoreText font
+Release tag `libass/0.17.5-arcroom.2` carries one static `libass.xcframework`:
+libass 0.17.5 with FreeType 2.14.3, HarfBuzz 14.2.1, FriBidi 1.0.16 and
+libunibreak 6.1 folded into a single `libass.a` per slice, the CoreText font
 provider enabled and fontconfig disabled. The public headers sit under `ass/`
 with an umbrella `libass.h` and a `CASS` module map whose link directives pull
 in libc++, libiconv, CoreText, CoreGraphics and CoreFoundation.
 
+Seven arm64 slices, one per platform Arcroom ships:
+
+| LibraryIdentifier | SDK | deployment target |
+| --- | --- | --- |
+| `macos-arm64` | `macosx` | macOS 15.4 |
+| `ios-arm64` | `iphoneos` | iOS 18.4 |
+| `ios-arm64-simulator` | `iphonesimulator` | iOS 18.4 |
+| `tvos-arm64` | `appletvos` | tvOS 26.0 |
+| `tvos-arm64-simulator` | `appletvsimulator` | tvOS 26.0 |
+| `xros-arm64` | `xros` | visionOS 26.0 |
+| `xros-arm64-simulator` | `xrsimulator` | visionOS 26.0 |
+
+There is no x86_64 anywhere. Unlike the ffmpeg artifact below, libass does carry
+tvOS: ffmpeg is absent there because the TV shell has no write path, while the
+TV shell does render subtitles. libass and its four dependencies are portable C
+with no platform-specific backend beyond CoreText, which every Apple platform
+has, so the slices differ only in target triple and SDK.
+
 Assets:
 
-- `libass-0.17.5-arcroom.1-macos-arm64.zip` — the XCFramework, every upstream
+- `libass-0.17.5-arcroom.2-apple-arm64.zip` — the XCFramework, every upstream
   license, and generated `PROVENANCE.md`, for a Bazel
   `apple_static_xcframework_import`.
-- `CASS-0.17.5-arcroom.1-macos-arm64.zip` — the same XCFramework alone at the
+- `CASS-0.17.5-arcroom.2-apple-arm64.zip` — the same XCFramework alone at the
   archive root, for a SwiftPM `binaryTarget`.
 - `<name>-<version>-source.tar.*` — the five exact pinned upstream tarballs.
 
