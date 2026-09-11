@@ -19,15 +19,17 @@ export const upstreamURL =
 export const upstreamSHA256 =
   '464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c'
 
-export const artifactRevision = 5
+export const artifactRevision = 6
 export const artifactSuffix =
   `${upstreamVersion}-arcroom.${artifactRevision}-apple-arm64`
 export const releaseTag =
   `ffmpeg/${upstreamVersion}-arcroom.${artifactRevision}`
 
 // The deployment floors are Arcroom's, from `packages/arcroom/package.yml`.
-// tvOS is absent on purpose: the TV shell has no write path and never links
-// these frameworks.
+// tvOS is present from arcroom.6 on: the TV shell plays original MKV files
+// directly through MediaEngine, which links libavformat, libavcodec, libavutil
+// and libswresample. It still has no write path, so the muxers ride along
+// unused there rather than being a reason for the slice.
 export interface Slice {
   id: string
   sdk: string
@@ -65,6 +67,24 @@ export const slices: Slice[] = [
     supportedPlatformVariant: 'simulator',
     bundlePlatform: 'iPhoneSimulator',
     minVersion: '18.4',
+  },
+  {
+    id: 'tvos-arm64',
+    sdk: 'appletvos',
+    llvmOS: 'tvos',
+    supportedPlatform: 'tvos',
+    supportedPlatformVariant: null,
+    bundlePlatform: 'AppleTVOS',
+    minVersion: '26.0',
+  },
+  {
+    id: 'tvos-arm64-simulator',
+    sdk: 'appletvsimulator',
+    llvmOS: 'tvos',
+    supportedPlatform: 'tvos',
+    supportedPlatformVariant: 'simulator',
+    bundlePlatform: 'AppleTVSimulator',
+    minVersion: '26.0',
   },
   {
     id: 'xros-arm64',
@@ -414,9 +434,9 @@ async function extractSource(scratch: string): Promise<string> {
   return source
 }
 
-// One extracted source, one out-of-tree build directory per slice: five
+// One extracted source, one out-of-tree build directory per slice: the
 // configurations cannot share `config.h`, and `make distclean` between them
-// would serialise what is otherwise five independent trees.
+// would serialise what are otherwise independent trees.
 async function buildSlice(
   source: string,
   scratch: string,
@@ -651,6 +671,8 @@ const platformCodes: Record<string, number> = {
   'macos-arm64': 1,
   'ios-arm64': 2,
   'ios-arm64-simulator': 7,
+  'tvos-arm64': 3,
+  'tvos-arm64-simulator': 8,
   'xros-arm64': 11,
   'xros-arm64-simulator': 12,
 }
@@ -783,9 +805,10 @@ ${
 - encoders: ${encoders.join(' ')}
 - parsers: ${parsers.join(' ')}
 - demuxers: ${demuxers.join(' ')}
+- muxers: ${muxers.join(' ')}
 - protocols: ${protocols.join(' ')}
 - hardware accelerators: ${hwaccels.join(' ')}
-- no muxers, filters, devices, or bitstream filters
+- no filters, devices, or bitstream filters
 - no libavfilter, libavdevice, or command-line tools
 
 ## Frameworks
