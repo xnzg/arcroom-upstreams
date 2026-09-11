@@ -39,9 +39,8 @@ its object files or an equivalent relinking mechanism; these assets do not by
 themselves discharge that distributor's LGPL obligations.
 
 This one-slice platform set no longer matches the ffmpeg and libass artifacts
-below, which carry macOS, iOS, visionOS and (for libass) tvOS slices. libsmb2
-owes the same widening; it is a separate artifact revision and has not been
-cut.
+below, which both carry macOS, iOS, tvOS and visionOS slices. libsmb2 owes the
+same widening; it is a separate artifact revision and has not been cut.
 
 Corresponding source and the complete build configuration are recorded in
 [`PROVENANCE-libsmb2.md`](PROVENANCE-libsmb2.md). The source tag resolves to
@@ -89,26 +88,35 @@ and hashes are in [`PROVENANCE-libass.md`](PROVENANCE-libass.md).
 
 ### ffmpeg 8.1.2
 
-Release tag `ffmpeg/8.1.2-arcroom.4` carries five frameworks — `libavutil`,
+Release tag `ffmpeg/8.1.2-arcroom.6` carries five frameworks — `libavutil`,
 `libswresample`, `libswscale`, `libavcodec`, and `libavformat` — each an
-XCFramework with five arm64 slices:
+XCFramework with seven arm64 slices:
 
 | LibraryIdentifier | SDK | deployment target |
 | --- | --- | --- |
 | `macos-arm64` | `macosx` | macOS 15.4 |
 | `ios-arm64` | `iphoneos` | iOS 18.4 |
 | `ios-arm64-simulator` | `iphonesimulator` | iOS 18.4 |
+| `tvos-arm64` | `appletvos` | tvOS 26.0 |
+| `tvos-arm64-simulator` | `appletvsimulator` | tvOS 26.0 |
 | `xros-arm64` | `xros` | visionOS 26.0 |
 | `xros-arm64-simulator` | `xrsimulator` | visionOS 26.0 |
 
-There is no x86_64 anywhere and no tvOS: Arcroom's TV shell has no write path
-and never links these frameworks. The deployment floors are Arcroom's, from its
-`package.yml`.
+There is no x86_64 anywhere. The deployment floors are Arcroom's, from its
+`package.yml`. tvOS arrived in `arcroom.6`: the TV shell plays original MKV
+files directly through MediaEngine, which links `libavformat`, `libavcodec`,
+`libavutil` and `libswresample`. It still has no write path, so the muxers ride
+along unused there rather than being a reason for the slice. Every platform is
+served by the same sources and the same flags; only the target triple and the
+SDK differ, and the aarch64 NEON assembly assembles on tvOS exactly as it does
+on iOS.
 
 The explicit allowlist retains Arcroom's audio ladder and adds Matroska and
 ISO-BMFF demuxing, H.264/HEVC decoding, VideoToolbox acceleration and encoding,
-and text-subtitle decoding for the standalone importer experiment. There are no
-muxers, filters, command-line tools, GPL, version-3, or nonfree components.
+and text-subtitle decoding. `arcroom.5` added the Matroska and ISO-BMFF muxers
+for the two plain-remux paths — the `extras.mkv` archive and export — plus the
+`sup` and `webvtt` demuxers for Arcroom's own sidecars. There are no filters,
+command-line tools, GPL, version-3, or nonfree components.
 
 Assets per release:
 
@@ -122,8 +130,8 @@ Every framework's install name is a flat `@rpath/<name>`, and each links its
 siblings by the same flat name, so a Bazel `_solib_*` directory and an app
 bundle's `Frameworks` directory both resolve them — and one binary satisfies
 both the versioned macOS bundle and the flat bundle every other platform
-requires. Only the macOS slice carries `Versions/A`; a versioned bundle on iOS
-or visionOS is rejected when an app embeds it.
+requires. Only the macOS slice carries `Versions/A`; a versioned bundle on iOS,
+tvOS or visionOS is rejected when an app embeds it.
 
 Each slice states its platform as an explicit LLVM triple
 (`--extra-cflags=-target arm64-apple-ios18.4-simulator …`) rather than a
@@ -142,7 +150,7 @@ slice passes every structural check.
   exact configure line and codec allowlist, and writes the `PROVENANCE.md` that
   rides in every artifact. A copy of that provenance — including the full
   configure flags — is checked in here as [PROVENANCE.md](PROVENANCE.md),
-  byte-for-byte as it ships inside `ffmpeg/8.1.2-arcroom.2`.
+  byte-for-byte as it ships inside `ffmpeg/8.1.2-arcroom.6`.
 
 One patch is applied, to every slice, from
 [`tools/ffmpeg/patches/`](tools/ffmpeg/patches):

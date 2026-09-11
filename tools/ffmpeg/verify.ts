@@ -159,6 +159,8 @@ async function verifySlice(
     'macos-arm64': '1',
     'ios-arm64': '2',
     'ios-arm64-simulator': '7',
+    'tvos-arm64': '3',
+    'tvos-arm64-simulator': '8',
     'xros-arm64': '11',
     'xros-arm64-simulator': '12',
   }
