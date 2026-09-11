@@ -1,5 +1,5 @@
 import { basename, join, resolve } from '../lib/path.ts'
-import { output, run } from '../lib/proc.ts'
+import { capture, output, run } from '../lib/proc.ts'
 
 export interface Upstream {
   name: string
@@ -65,23 +65,125 @@ export const upstreams: Upstream[] = [
 ]
 
 export const libassVersion = '0.17.5'
-export const artifactRevision = 1
+export const artifactRevision = 2
 export const artifactSuffix =
-  `${libassVersion}-arcroom.${artifactRevision}-macos-arm64`
+  `${libassVersion}-arcroom.${artifactRevision}-apple-arm64`
 export const artifactName = `libass-${artifactSuffix}.zip`
 export const moduleName = 'CASS'
 export const swiftPMArtifactName = `${moduleName}-${artifactSuffix}.zip`
 export const releaseTag = `libass/${libassVersion}-arcroom.${artifactRevision}`
-export const minimumMacOSVersion = '15.0'
 export const publicHeaders = ['ass.h', 'ass_types.h']
+
+// The system libraries a force-loaded `libass.a` is allowed to pull in, by
+// leaf name: the absolute paths differ per platform (a macOS framework binary
+// sits under `Versions/A`, every other platform's does not), the set does not.
 export const linkedLibraries = [
-  '/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation',
-  '/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics',
-  '/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText',
-  '/usr/lib/libSystem.B.dylib',
-  '/usr/lib/libc++.1.dylib',
-  '/usr/lib/libiconv.2.dylib',
+  'CoreFoundation',
+  'CoreGraphics',
+  'CoreText',
+  'libSystem.B.dylib',
+  'libc++.1.dylib',
+  'libiconv.2.dylib',
 ]
+
+// The deployment floors are Arcroom's, from `packages/arcroom/package.yml`, and
+// match the ffmpeg artifact's. Unlike ffmpeg, libass does get a tvOS slice:
+// ffmpeg is absent there only because the TV shell has no write path, while the
+// TV shell does render subtitles.
+export interface Slice {
+  id: string
+  sdk: string
+  llvmOS: string
+  supportedPlatform: string
+  supportedPlatformVariant: string | null
+  cmakeSystemName: string | null
+  vtoolPlatform: string
+  minVersion: string
+}
+
+export const slices: Slice[] = [
+  {
+    id: 'macos-arm64',
+    sdk: 'macosx',
+    llvmOS: 'macos',
+    supportedPlatform: 'macos',
+    supportedPlatformVariant: null,
+    cmakeSystemName: null,
+    vtoolPlatform: 'MACOS',
+    minVersion: '15.4',
+  },
+  {
+    id: 'ios-arm64',
+    sdk: 'iphoneos',
+    llvmOS: 'ios',
+    supportedPlatform: 'ios',
+    supportedPlatformVariant: null,
+    cmakeSystemName: 'iOS',
+    vtoolPlatform: 'IOS',
+    minVersion: '18.4',
+  },
+  {
+    id: 'ios-arm64-simulator',
+    sdk: 'iphonesimulator',
+    llvmOS: 'ios',
+    supportedPlatform: 'ios',
+    supportedPlatformVariant: 'simulator',
+    cmakeSystemName: 'iOS',
+    vtoolPlatform: 'IOSSIMULATOR',
+    minVersion: '18.4',
+  },
+  {
+    id: 'tvos-arm64',
+    sdk: 'appletvos',
+    llvmOS: 'tvos',
+    supportedPlatform: 'tvos',
+    supportedPlatformVariant: null,
+    cmakeSystemName: 'tvOS',
+    vtoolPlatform: 'TVOS',
+    minVersion: '26.0',
+  },
+  {
+    id: 'tvos-arm64-simulator',
+    sdk: 'appletvsimulator',
+    llvmOS: 'tvos',
+    supportedPlatform: 'tvos',
+    supportedPlatformVariant: 'simulator',
+    cmakeSystemName: 'tvOS',
+    vtoolPlatform: 'TVOSSIMULATOR',
+    minVersion: '26.0',
+  },
+  {
+    id: 'xros-arm64',
+    sdk: 'xros',
+    llvmOS: 'xros',
+    supportedPlatform: 'xros',
+    supportedPlatformVariant: null,
+    cmakeSystemName: 'visionOS',
+    vtoolPlatform: 'VISIONOS',
+    minVersion: '26.0',
+  },
+  {
+    id: 'xros-arm64-simulator',
+    sdk: 'xrsimulator',
+    llvmOS: 'xros',
+    supportedPlatform: 'xros',
+    supportedPlatformVariant: 'simulator',
+    cmakeSystemName: 'visionOS',
+    vtoolPlatform: 'VISIONOSSIMULATOR',
+    minVersion: '26.0',
+  },
+]
+
+// The triple is the only input that settles a slice's LC_BUILD_VERSION.
+// `-mmacosx-version-min` has no simulator spelling at all, and letting a
+// configure probe pick the platform is how a device object ends up filed as a
+// simulator slice.
+export function triple(slice: Slice): string {
+  const variant = slice.supportedPlatformVariant
+  return `arm64-apple-${slice.llvmOS}${slice.minVersion}${
+    variant === null ? '' : `-${variant}`
+  }`
+}
 
 export function sourceArtifactName(upstream: Upstream): string {
   const extension = upstream.url.endsWith('.tar.xz') ? '.tar.xz' : '.tar.gz'
@@ -92,10 +194,16 @@ interface Args {
   scratch: string | null
   out: string
   keep: boolean
+  only: string[] | null
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { scratch: null, out: 'dist-libass', keep: false }
+  const args: Args = {
+    scratch: null,
+    out: 'dist-libass',
+    keep: false,
+    only: null,
+  }
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
       case '--scratch':
@@ -106,6 +214,9 @@ function parseArgs(argv: string[]): Args {
         break
       case '--keep':
         args.keep = true
+        break
+      case '--only':
+        args.only = argv[++i]!.split(',')
         break
       default:
         throw new Error(`unknown argument: ${argv[i]}`)
@@ -129,7 +240,7 @@ async function onPath(tool: string): Promise<boolean> {
 
 async function preflight(): Promise<void> {
   if (Deno.build.os !== 'darwin' || Deno.build.arch !== 'aarch64') {
-    throw new Error('the artifact is macOS arm64 only; run on Apple silicon')
+    throw new Error('the artifact is Apple arm64 only; run on Apple silicon')
   }
   for (
     const tool of ['tar', 'xcrun', 'xcodebuild', 'zip', 'cmake', 'make', 'sh']
@@ -174,28 +285,35 @@ async function fetchSource(
   return tarball
 }
 
-async function extractSource(
+// Autotools configures and builds in the source tree, so every slice gets its
+// own extraction rather than a shared one — seven `make distclean` rounds would
+// serialise what is otherwise seven independent trees, and freetype's CMake
+// cache is per-platform anyway.
+async function extractSources(
   scratch: string,
-  upstream: Upstream,
-): Promise<{ directory: string; tarball: string }> {
-  const tarball = await fetchSource(scratch, upstream)
-  const directory = join(scratch, upstream.directory)
-  await Deno.remove(directory, { recursive: true }).catch(() => {})
-  await run(['tar', 'xf', tarball], scratch)
-  return { directory, tarball }
+  workDir: string,
+): Promise<Map<string, string>> {
+  await Deno.remove(workDir, { recursive: true }).catch(() => {})
+  await Deno.mkdir(workDir, { recursive: true })
+  const directories = new Map<string, string>()
+  for (const upstream of upstreams) {
+    const tarball = await fetchSource(scratch, upstream)
+    await run(['tar', 'xf', tarball], workDir)
+    directories.set(upstream.name, join(workDir, upstream.directory))
+  }
+  return directories
 }
 
 interface Toolchain {
   xcodeVersion: string
   xcodeBuild: string
   clangVersion: string
-  sdkVersion: string
-  sdkPath: string
+  sdkVersions: Map<string, string>
   cc: string
   cxx: string
 }
 
-async function toolchain(): Promise<Toolchain> {
+async function toolchain(active: Slice[]): Promise<Toolchain> {
   const xcode = (await output(['xcodebuild', '-version'])).trim().split('\n')
   const clang = (await output([
     'xcrun',
@@ -204,25 +322,34 @@ async function toolchain(): Promise<Toolchain> {
     'clang',
     '--version',
   ])).split('\n')[0]!.trim()
+  const sdkVersions = new Map<string, string>()
+  for (const slice of active) {
+    if (sdkVersions.has(slice.sdk)) continue
+    sdkVersions.set(
+      slice.sdk,
+      (await capture(['xcrun', '--sdk', slice.sdk, '--show-sdk-version']))
+        .trim(),
+    )
+  }
   return {
     xcodeVersion: xcode[0]?.replace(/^Xcode /, '') ?? '',
     xcodeBuild: xcode[1]?.replace(/^Build version /, '') ?? '',
     clangVersion: clang,
-    sdkVersion: (await output([
-      'xcrun',
-      '--sdk',
-      'macosx',
-      '--show-sdk-version',
-    ])).trim(),
-    sdkPath: (await output(['xcrun', '--sdk', 'macosx', '--show-sdk-path']))
-      .trim(),
+    sdkVersions,
     cc: (await output(['xcrun', '--sdk', 'macosx', '-f', 'clang'])).trim(),
     cxx: (await output(['xcrun', '--sdk', 'macosx', '-f', 'clang++'])).trim(),
   }
 }
 
-export function commonFlags(sdk: string): string {
-  return `-arch arm64 -mmacosx-version-min=${minimumMacOSVersion} -isysroot ${sdk} -O2 -DNDEBUG -fPIC -fvisibility=hidden`
+export async function sdkPath(slice: Slice): Promise<string> {
+  return (await capture(['xcrun', '--sdk', slice.sdk, '--show-sdk-path']))
+    .trim()
+}
+
+export function commonFlags(slice: Slice, sdk: string): string {
+  return `-target ${
+    triple(slice)
+  } -isysroot ${sdk} -O2 -DNDEBUG -fPIC -fvisibility=hidden`
 }
 
 export const configureOptions = {
@@ -259,40 +386,56 @@ export const configureOptions = {
 }
 
 function buildEnvironment(
+  slice: Slice,
+  sdk: string,
   tools: Toolchain,
   prefix: string,
 ): Record<string, string> {
-  const flags = commonFlags(tools.sdkPath)
-  return {
-    MACOSX_DEPLOYMENT_TARGET: minimumMacOSVersion,
+  const flags = commonFlags(slice, sdk)
+  const env: Record<string, string> = {
     CC: tools.cc,
     CXX: tools.cxx,
     CFLAGS: flags,
     CXXFLAGS: flags,
-    LDFLAGS:
-      `-arch arm64 -mmacosx-version-min=${minimumMacOSVersion} -isysroot ${tools.sdkPath}`,
+    LDFLAGS: `-target ${triple(slice)} -isysroot ${sdk}`,
     PKG_CONFIG_PATH: join(prefix, 'lib', 'pkgconfig'),
     PKG_CONFIG_LIBDIR: join(prefix, 'lib', 'pkgconfig'),
   }
+  // Only meaningful for the macOS slice, and actively harmful elsewhere:
+  // libtool and the linker both read it and would stamp a macOS floor onto an
+  // iOS object.
+  if (slice.supportedPlatform === 'macos') {
+    env.MACOSX_DEPLOYMENT_TARGET = slice.minVersion
+  }
+  return env
 }
 
 async function buildFreetype(
   source: string,
   prefix: string,
-  tools: Toolchain,
+  slice: Slice,
+  sdk: string,
   env: Record<string, string>,
 ): Promise<void> {
   const build = join(source, 'build')
   await Deno.mkdir(build, { recursive: true })
+  // CMake owns the platform selection here rather than a `-target` in
+  // CMAKE_C_FLAGS: it appends its own arch/sysroot/version-min flags after the
+  // user flags, so a triple in CFLAGS loses the argument. The system name plus
+  // the simulator-or-device sysroot is what CMake reads, and every object's
+  // LC_BUILD_VERSION is asserted afterwards regardless.
   await run(
     [
       'cmake',
       '..',
-      `-DCMAKE_OSX_ARCHITECTURES=arm64`,
-      `-DCMAKE_OSX_DEPLOYMENT_TARGET=${minimumMacOSVersion}`,
-      `-DCMAKE_OSX_SYSROOT=${tools.sdkPath}`,
+      ...(slice.cmakeSystemName === null
+        ? []
+        : [`-DCMAKE_SYSTEM_NAME=${slice.cmakeSystemName}`]),
+      '-DCMAKE_OSX_ARCHITECTURES=arm64',
+      `-DCMAKE_OSX_DEPLOYMENT_TARGET=${slice.minVersion}`,
+      `-DCMAKE_OSX_SYSROOT=${sdk}`,
       `-DCMAKE_INSTALL_PREFIX=${prefix}`,
-      `-DCMAKE_C_FLAGS=${commonFlags(tools.sdkPath)}`,
+      '-DCMAKE_C_FLAGS=-O2 -DNDEBUG -fPIC -fvisibility=hidden',
       ...configureOptions.freetype,
     ],
     build,
@@ -329,16 +472,17 @@ async function buildAutotools(
 async function buildHarfbuzz(
   source: string,
   prefix: string,
-  tools: Toolchain,
+  slice: Slice,
+  sdk: string,
   scratch: string,
 ): Promise<void> {
   const object = join(scratch, 'harfbuzz.o')
   await run([
     'xcrun',
     '--sdk',
-    'macosx',
+    slice.sdk,
     'clang++',
-    ...commonFlags(tools.sdkPath).split(' '),
+    ...commonFlags(slice, sdk).split(' '),
     ...configureOptions.harfbuzz,
     `-I${join(prefix, 'include', 'freetype2')}`,
     '-c',
@@ -349,12 +493,13 @@ async function buildHarfbuzz(
   await run([
     'xcrun',
     '--sdk',
-    'macosx',
+    slice.sdk,
     'ar',
     'rcs',
     join(prefix, 'lib', 'libharfbuzz.a'),
     object,
   ])
+  await Deno.remove(object)
   const include = join(prefix, 'include', 'harfbuzz')
   await Deno.mkdir(include, { recursive: true })
   for await (const entry of Deno.readDir(join(source, 'src'))) {
@@ -412,14 +557,16 @@ function moduleMap(): string {
 
 async function combineArchive(
   prefix: string,
-  scratch: string,
+  slice: Slice,
+  slicesDir: string,
 ): Promise<string> {
-  const archive = join(scratch, 'libass.a')
+  const archive = join(slicesDir, slice.id, 'libass.a')
+  await Deno.mkdir(join(slicesDir, slice.id), { recursive: true })
   await Deno.remove(archive).catch(() => {})
   await run([
     'xcrun',
     '--sdk',
-    'macosx',
+    slice.sdk,
     'libtool',
     '-static',
     '-o',
@@ -431,6 +578,46 @@ async function combineArchive(
     join(prefix, 'lib', 'libunibreak.a'),
   ])
   return archive
+}
+
+// The platform a slice actually landed on is decided by LC_BUILD_VERSION, not
+// by the SDK the compiler saw, and `xcodebuild -create-xcframework` reads that
+// load command to place the slice. Asserting every member here is what stops a
+// device object from being filed as a simulator one, and it is the only check
+// on CMake's and configure's platform guesses.
+export async function assertPlatform(
+  archive: string,
+  slice: Slice,
+  scratch: string,
+): Promise<number> {
+  const objects = join(scratch, `objects-${slice.id}`)
+  await Deno.remove(objects, { recursive: true }).catch(() => {})
+  await Deno.mkdir(objects, { recursive: true })
+  await run(['xcrun', 'ar', '-x', archive], objects)
+  let count = 0
+  for await (const entry of Deno.readDir(objects)) {
+    if (!entry.isFile || !entry.name.endsWith('.o')) continue
+    const build = await capture([
+      'xcrun',
+      'vtool',
+      '-show-build',
+      join(objects, entry.name),
+    ])
+    if (!build.includes(`platform ${slice.vtoolPlatform}`)) {
+      throw new Error(
+        `${entry.name} in ${slice.id}: expected platform ${slice.vtoolPlatform}, got:\n${build}`,
+      )
+    }
+    if (!build.includes(`minos ${slice.minVersion}`)) {
+      throw new Error(
+        `${entry.name} in ${slice.id}: expected minos ${slice.minVersion}, got:\n${build}`,
+      )
+    }
+    count++
+  }
+  await Deno.remove(objects, { recursive: true })
+  if (count === 0) throw new Error(`${archive} has no objects`)
+  return count
 }
 
 async function stageHeaders(prefix: string, scratch: string): Promise<string> {
@@ -448,47 +635,75 @@ async function stageHeaders(prefix: string, scratch: string): Promise<string> {
   return headers
 }
 
-function provenance(tools: Toolchain): string {
+const platformNames: Record<string, string> = {
+  macos: 'macOS',
+  ios: 'iOS',
+  tvos: 'tvOS',
+  xros: 'visionOS',
+}
+
+function provenance(tools: Toolchain, active: Slice[]): string {
   const sources = upstreams.map((upstream) =>
     `- ${upstream.name} ${upstream.version}: ${upstream.url} (sha256 ${upstream.sha256}), ${upstream.license}, license file \`${upstream.licenseFile}\`, published beside this archive as \`${
       sourceArtifactName(upstream)
     }\`.`
   ).join('\n')
-  return `# libass ${libassVersion} for Arcroom (macOS arm64)
+  const sliceRows = active.map((slice) =>
+    `| \`${slice.id}\` | \`${slice.sdk}\` | \`${triple(slice)}\` | ${
+      platformNames[slice.llvmOS]
+    } ${slice.minVersion} | ${tools.sdkVersions.get(slice.sdk)} |`
+  ).join('\n')
+  return `# libass ${libassVersion} for Arcroom (Apple arm64)
 
 Built by \`tools/libass/build.ts\` in github.com/xnzg/arcroom-upstreams.
 Reproduce by running \`deno task libass-build\` at the revision that pins this
 artifact.
 
 - Release tag: ${releaseTag}
-- Deployment target: macOS ${minimumMacOSVersion}, arm64.
 - Clang module: ${moduleName}.
 - Xcode: ${tools.xcodeVersion} (build ${tools.xcodeBuild}).
 - Apple clang: ${tools.clangVersion}.
-- macOS SDK: ${tools.sdkVersion}.
 - Upstream modifications: none.
 
 ## Upstream sources
 
 ${sources}
 
+## Slices
+
+Every slice is arm64; there is no x86_64 anywhere. The deployment floors are
+Arcroom's, from its \`package.yml\`.
+
+| LibraryIdentifier | SDK | target triple | deployment target | SDK version |
+| --- | --- | --- | --- | --- |
+${sliceRows}
+
 ## Build
 
-One static archive, \`libass.a\`, holds libass and every library it needs at
-link time: FreeType (no zlib, bzip2, png, brotli or HarfBuzz callback),
-FriBidi, HarfBuzz (the single-file amalgamation compiled with the Xcode
-clang++, FreeType and CoreText enabled, no glib, ICU or graphite) and
+One static archive, \`libass.a\` per slice, holds libass and every library it
+needs at link time: FreeType (no zlib, bzip2, png, brotli or HarfBuzz
+callback), FriBidi, HarfBuzz (the single-file amalgamation compiled with the
+Xcode clang++, FreeType and CoreText enabled, no glib, ICU or graphite) and
 libunibreak. Fontconfig and DirectWrite are disabled; the CoreText font
-provider is the only system provider and libass is configured not to require
-one, so fonts added through \`ass_add_font\` work without any system font.
+provider is the only system provider and is present on every slice, and libass
+is configured not to require one, so fonts added through \`ass_add_font\` work
+without any system font. Every platform is served by the same portable C
+sources and the same flags — only the target triple and the SDK differ.
 
-Common compile flags:
+Common compile flags, where \`<target>\` is the slice's triple and
+\`<sysroot>\` its SDK path:
 
 \`\`\`
-${commonFlags('<macosx-sdk>')}
+${commonFlags(active[0]!, '<sysroot>').replace(triple(active[0]!), '<target>')}
 \`\`\`
 
 FreeType (CMake): ${configureOptions.freetype.join(' ')}
+
+Every FreeType slice also passes \`-DCMAKE_OSX_ARCHITECTURES=arm64
+-DCMAKE_OSX_SYSROOT=<sysroot> -DCMAKE_OSX_DEPLOYMENT_TARGET=<floor>\`, and a
+non-macOS slice adds \`-DCMAKE_SYSTEM_NAME=<iOS|tvOS|visionOS>\`: CMake appends
+its own platform flags after the user ones, so it owns the target selection
+there rather than a triple in \`CMAKE_C_FLAGS\`.
 
 FriBidi (configure): ${configureOptions.fribidi.join(' ')}
 
@@ -498,13 +713,16 @@ HarfBuzz (clang++ on src/harfbuzz.cc): ${configureOptions.harfbuzz.join(' ')}
 
 libass (configure): ${configureOptions.libass.join(' ')}
 
+Every autotools package is configured \`--host=aarch64-apple-darwin\`, so no
+configure probe runs a target binary.
+
 ## Artifact
 
-\`libass.xcframework\` contains one static \`libass.a\` slice, the two public
-libass headers under \`ass/\`, an umbrella \`libass.h\` and a \`${moduleName}\`
-module map whose link directives pull in libc++, libiconv, CoreText,
-CoreGraphics and CoreFoundation. The platform set matches the libsmb2 artifact
-in this repository: macOS arm64 only.
+\`libass.xcframework\` contains one static \`libass.a\` per slice above, the two
+public libass headers under \`ass/\`, an umbrella \`libass.h\` and a
+\`${moduleName}\` module map whose link directives pull in libc++, libiconv,
+CoreText, CoreGraphics and CoreFoundation. Every member object of every archive
+is asserted to carry the slice's \`LC_BUILD_VERSION\` platform and minimum OS.
 
 FriBidi is LGPL v2.1 and statically linked here, so an application distributor
 must satisfy LGPL v2.1 section 6 for it, including providing the application
@@ -515,8 +733,10 @@ This archive alone does not discharge the consuming application's obligations.
 }
 
 async function packageArtifact(
-  sources: Map<string, { directory: string; tarball: string }>,
-  archive: string,
+  archives: Map<string, string>,
+  active: Slice[],
+  licenses: string,
+  tarballs: Map<string, string>,
   headers: string,
   tools: Toolchain,
   scratch: string,
@@ -525,26 +745,22 @@ async function packageArtifact(
   const stage = join(scratch, 'stage')
   await Deno.remove(stage, { recursive: true }).catch(() => {})
   await Deno.mkdir(stage, { recursive: true })
-  await run([
-    'xcodebuild',
-    '-create-xcframework',
-    '-library',
-    archive,
-    '-headers',
-    headers,
-    '-output',
-    join(stage, 'libass.xcframework'),
-  ])
+  const args = ['xcodebuild', '-create-xcframework']
+  for (const slice of active) {
+    args.push('-library', archives.get(slice.id)!, '-headers', headers)
+  }
+  args.push('-output', join(stage, 'libass.xcframework'))
+  await run(args)
   const licenseNames: string[] = []
   for (const upstream of upstreams) {
     const name = `LICENSE-${upstream.name}.txt`
-    await Deno.copyFile(
-      join(sources.get(upstream.name)!.directory, upstream.licenseFile),
-      join(stage, name),
-    )
+    await Deno.copyFile(join(licenses, name), join(stage, name))
     licenseNames.push(name)
   }
-  await Deno.writeTextFile(join(stage, 'PROVENANCE.md'), provenance(tools))
+  await Deno.writeTextFile(
+    join(stage, 'PROVENANCE.md'),
+    provenance(tools, active),
+  )
 
   const resolvedOut = resolve(outDir)
   await Deno.mkdir(resolvedOut, { recursive: true })
@@ -579,7 +795,7 @@ async function packageArtifact(
   const artifacts = [zip, swiftPMZip]
   for (const upstream of upstreams) {
     const target = join(resolvedOut, sourceArtifactName(upstream))
-    await Deno.copyFile(sources.get(upstream.name)!.tarball, target)
+    await Deno.copyFile(tarballs.get(upstream.name)!, target)
     artifacts.push(target)
   }
   return artifacts
@@ -588,50 +804,76 @@ async function packageArtifact(
 export async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv)
   await preflight()
+  const active = args.only === null
+    ? slices
+    : slices.filter((slice) => args.only!.includes(slice.id))
+  if (active.length === 0) throw new Error('no slice matched --only')
   const scratch = resolve(
     args.scratch ?? join(Deno.env.get('TMPDIR') ?? '/tmp', 'arcroom-libass'),
   )
   await Deno.mkdir(scratch, { recursive: true })
-  const prefix = join(scratch, 'prefix')
+  const slicesDir = join(scratch, 'slices')
+  const licenses = join(scratch, 'licenses')
   try {
-    await Deno.remove(prefix, { recursive: true }).catch(() => {})
-    await Deno.mkdir(join(prefix, 'lib', 'pkgconfig'), { recursive: true })
-    const tools = await toolchain()
-    const env = buildEnvironment(tools, prefix)
-    const sources = new Map<string, { directory: string; tarball: string }>()
+    await Deno.remove(slicesDir, { recursive: true }).catch(() => {})
+    await Deno.mkdir(licenses, { recursive: true })
+    const tools = await toolchain(active)
+    const tarballs = new Map<string, string>()
     for (const upstream of upstreams) {
-      sources.set(upstream.name, await extractSource(scratch, upstream))
+      tarballs.set(upstream.name, await fetchSource(scratch, upstream))
     }
-    await buildFreetype(sources.get('freetype')!.directory, prefix, tools, env)
-    await buildAutotools(
-      sources.get('fribidi')!.directory,
-      prefix,
-      configureOptions.fribidi,
-      env,
-    )
-    await buildAutotools(
-      sources.get('libunibreak')!.directory,
-      prefix,
-      configureOptions.libunibreak,
-      env,
-    )
-    await buildHarfbuzz(
-      sources.get('harfbuzz')!.directory,
-      prefix,
-      tools,
-      scratch,
-    )
-    await buildAutotools(
-      sources.get('libass')!.directory,
-      prefix,
-      configureOptions.libass,
-      env,
-    )
-    const archive = await combineArchive(prefix, scratch)
-    const headers = await stageHeaders(prefix, scratch)
+    const archives = new Map<string, string>()
+    let headers = ''
+    for (const slice of active) {
+      console.log(`\n=== ${slice.id} (${triple(slice)}) ===`)
+      const sdk = await sdkPath(slice)
+      const workDir = join(scratch, 'work', slice.id)
+      const prefix = join(scratch, 'prefix', slice.id)
+      await Deno.remove(prefix, { recursive: true }).catch(() => {})
+      await Deno.mkdir(join(prefix, 'lib', 'pkgconfig'), { recursive: true })
+      const sources = await extractSources(scratch, workDir)
+      for (const upstream of upstreams) {
+        await Deno.copyFile(
+          join(sources.get(upstream.name)!, upstream.licenseFile),
+          join(licenses, `LICENSE-${upstream.name}.txt`),
+        )
+      }
+      const env = buildEnvironment(slice, sdk, tools, prefix)
+      await buildFreetype(sources.get('freetype')!, prefix, slice, sdk, env)
+      await buildAutotools(
+        sources.get('fribidi')!,
+        prefix,
+        configureOptions.fribidi,
+        env,
+      )
+      await buildAutotools(
+        sources.get('libunibreak')!,
+        prefix,
+        configureOptions.libunibreak,
+        env,
+      )
+      await buildHarfbuzz(sources.get('harfbuzz')!, prefix, slice, sdk, scratch)
+      await buildAutotools(
+        sources.get('libass')!,
+        prefix,
+        configureOptions.libass,
+        env,
+      )
+      const archive = await combineArchive(prefix, slice, slicesDir)
+      const objects = await assertPlatform(archive, slice, scratch)
+      console.log(
+        `${slice.id}: ${objects} objects, platform ${slice.vtoolPlatform}, minos ${slice.minVersion}`,
+      )
+      if (headers === '') headers = await stageHeaders(prefix, scratch)
+      await Deno.remove(workDir, { recursive: true }).catch(() => {})
+      await Deno.remove(prefix, { recursive: true }).catch(() => {})
+      archives.set(slice.id, archive)
+    }
     const artifacts = await packageArtifact(
-      sources,
-      archive,
+      archives,
+      active,
+      licenses,
+      tarballs,
       headers,
       tools,
       scratch,
@@ -645,12 +887,12 @@ export async function main(argv: string[]): Promise<void> {
     if (!args.keep) {
       for (
         const entry of [
-          ...upstreams.map((upstream) => upstream.directory),
+          'work',
           'prefix',
-          'harfbuzz.o',
-          'libass.a',
+          'slices',
           'headers',
           'stage',
+          'licenses',
         ]
       ) {
         await Deno.remove(join(scratch, entry), { recursive: true }).catch(
