@@ -12,6 +12,7 @@ import {
   buildVersion,
   bundleIdentifier,
   frameworkName,
+  headerRewrites,
   headers,
   installName,
   isVersionedLayout,
@@ -98,6 +99,52 @@ function frameworkRoot(dir: string, slice: typeof slices[number]): string {
 
 function frameworkBinary(dir: string, slice: typeof slices[number]): string {
   return join(frameworkRoot(dir, slice), frameworkName)
+}
+
+async function upstreamHeader(
+  source: string,
+  header: string,
+): Promise<string> {
+  return await capture([
+    'tar',
+    '-xzOf',
+    source,
+    `libsmb2-${upstreamTag}/include/${header}`,
+  ])
+}
+
+// The one packaging difference the artifact carries, asserted rather than
+// trusted: every shipped header is upstream's own text with exactly the
+// recorded cross-include re-spellings.
+async function verifyHeaders(
+  scratch: string,
+  source: string,
+  xcframework: string,
+): Promise<void> {
+  const expected = new Map<string, string>()
+  for (const header of headers) {
+    let text = await upstreamHeader(source, header)
+    for (const [from, to] of headerRewrites[header] ?? []) {
+      check(
+        text.includes(from),
+        `upstream ${header} still spells \`${from}\``,
+      )
+      text = text.replace(from, to)
+    }
+    expected.set(header, text)
+  }
+  for (const slice of slices) {
+    const root = frameworkRoot(join(xcframework, slice.id), slice)
+    for (const header of headers) {
+      const shipped = join(root, 'Headers', header)
+      if (!await exists(shipped)) continue
+      check(
+        await Deno.readTextFile(shipped) === expected.get(header),
+        `${slice.id}: Headers/${header} is upstream's apart from the recorded re-spellings`,
+      )
+    }
+  }
+  await Deno.remove(join(scratch, 'headers')).catch(() => {})
 }
 
 async function sdkPath(slice: typeof slices[number]): Promise<string> {
@@ -410,49 +457,65 @@ async function main(argv: string[]): Promise<void> {
         ),
         'xcframework holds exactly one directory per slice',
       )
-      for (const [index, slice] of slices.entries()) {
-        const at = (key: string) => `AvailableLibraries.${index}.${key}`
+      const rows = JSON.parse(
+        await capture(['plutil', '-convert', 'json', '-o', '-', plist]),
+      ).AvailableLibraries as {
+        LibraryIdentifier: string
+        SupportedPlatform: string
+        SupportedPlatformVariant?: string
+        SupportedArchitectures: string[]
+        LibraryPath: string
+      }[]
+      check(
+        rows.length === slices.length,
+        `AvailableLibraries has one row per slice (${slices.length})`,
+      )
+      const row = (id: string) =>
+        rows.find((each) => each.LibraryIdentifier === id)
+      for (const slice of slices) {
+        const library = row(slice.id)
         check(
-          await plistValue(plist, at('LibraryIdentifier')) === slice.id,
-          `${slice.id}: LibraryIdentifier row ${index}`,
+          library !== undefined,
+          `${slice.id}: has an AvailableLibraries row`,
         )
+        if (!library) continue
         check(
-          await plistValue(plist, at('SupportedPlatform')) ===
-            slice.supportedPlatform,
+          library.SupportedPlatform === slice.supportedPlatform,
           `${slice.id}: SupportedPlatform ${slice.supportedPlatform}`,
         )
-        if (slice.supportedPlatformVariant === null) {
-          check(
-            !(await capture([
-              'plutil',
-              '-extract',
-              at('SupportedPlatformVariant'),
-              'raw',
-              '-o',
-              '-',
-              plist,
-            ]).catch(() => '')).trim(),
-            `${slice.id}: no SupportedPlatformVariant`,
-          )
-        } else {
-          check(
-            await plistValue(plist, at('SupportedPlatformVariant')) ===
-              slice.supportedPlatformVariant,
-            `${slice.id}: SupportedPlatformVariant ${slice.supportedPlatformVariant}`,
-          )
-        }
         check(
-          await plistValue(plist, at('SupportedArchitectures.0')) === 'arm64',
+          library.SupportedPlatformVariant ===
+            (slice.supportedPlatformVariant ?? undefined),
+          `${slice.id}: SupportedPlatformVariant ${
+            slice.supportedPlatformVariant ?? 'none'
+          }`,
+        )
+        check(
+          sameStrings(library.SupportedArchitectures, ['arm64']),
           `${slice.id}: SupportedArchitectures arm64`,
         )
         check(
-          await plistValue(plist, at('LibraryPath')) ===
-            `${frameworkName}.framework`,
+          library.LibraryPath === `${frameworkName}.framework`,
           `${slice.id}: LibraryPath ${frameworkName}.framework`,
         )
       }
     }
 
+    const source = join(dist, sourceArtifactName)
+    check(await exists(source), `${basename(source)} present`)
+    check(
+      await sha256(source) === upstreamSHA256,
+      'source asset is byte-identical to the pinned upstream tarball',
+    )
+    const members = await capture(['tar', '-tzf', source])
+    check(
+      members.split('\n').includes(
+        `libsmb2-${upstreamTag}/LICENCE-LGPL-2.1.txt`,
+      ),
+      'source asset contains the upstream LGPL license',
+    )
+
+    await verifyHeaders(scratch, source, xcframework)
     for (const slice of slices) {
       await verifySlice(scratch, join(xcframework, slice.id), slice)
     }
@@ -475,20 +538,6 @@ async function main(argv: string[]): Promise<void> {
       stderr: 'inherit',
     }).output()
     check(same.success, 'SwiftPM xcframework matches the combined zip')
-
-    const source = join(dist, sourceArtifactName)
-    check(await exists(source), `${basename(source)} present`)
-    check(
-      await sha256(source) === upstreamSHA256,
-      'source asset is byte-identical to the pinned upstream tarball',
-    )
-    const members = await capture(['tar', '-tzf', source])
-    check(
-      members.split('\n').includes(
-        `libsmb2-${upstreamTag}/LICENCE-LGPL-2.1.txt`,
-      ),
-      'source asset contains the upstream LGPL license',
-    )
 
     console.log(`\n${await sha256(zip)}  ${basename(zip)}`)
     console.log(`${await sha256(swiftPMZip)}  ${basename(swiftPMZip)}`)

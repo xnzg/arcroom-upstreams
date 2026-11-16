@@ -217,6 +217,28 @@ export const headers = [
   'smb2/smb2.h',
 ]
 
+// Upstream's headers cross-include as `<smb2/x.h>`, which only resolves through
+// an include path. Inside a framework there is none, and the framework lookup
+// clang falls back to matches the *framework's* name (SMB2), which only finds a
+// `smb2.framework` on a case-insensitive volume. These three
+// framework-internal cross-includes are therefore respelled relative in the
+// shipped copies; the compiled sources and every other byte are upstream's,
+// and the verifier asserts exactly this difference.
+export const headerRewrites: Record<string, [string, string][]> = {
+  'smb2/libsmb2-dcerpc-srvsvc.h': [[
+    '#include <smb2/libsmb2-dcerpc.h>',
+    '#include "libsmb2-dcerpc.h"',
+  ]],
+  'smb2/libsmb2.h': [[
+    '#include <smb2/libsmb2-dcerpc-srvsvc.h>',
+    '#include "libsmb2-dcerpc-srvsvc.h"',
+  ]],
+  'smb2/smb2.h': [[
+    '#include <smb2/smb2-errors.h>',
+    '#include "smb2-errors.h"',
+  ]],
+}
+
 // Upstream's `include/module.modulemap`, byte for byte apart from the
 // `framework` keyword: the submodule surface is the contract `import SMB2` and
 // `import SMB2.Raw` are written against.
@@ -506,10 +528,14 @@ async function stageFramework(
     if (rest.length > 0) {
       await Deno.mkdir(join(versioned, 'Headers', folder!), { recursive: true })
     }
-    await Deno.copyFile(
-      join(source, 'include', header),
-      join(versioned, 'Headers', header),
-    )
+    let text = await Deno.readTextFile(join(source, 'include', header))
+    for (const [from, to] of headerRewrites[header] ?? []) {
+      if (text.split(from).length !== 2) {
+        throw new Error(`${header}: expected exactly one \`${from}\``)
+      }
+      text = text.replace(from, to)
+    }
+    await Deno.writeTextFile(join(versioned, 'Headers', header), text)
   }
   await Deno.writeTextFile(
     join(versioned, 'Modules', 'module.modulemap'),
@@ -664,7 +690,10 @@ artifact.
 - Release tag: ${releaseTag}
 - License: LGPL v2.1 or later (see LICENCE-LGPL-2.1.txt, shipped as \`COPYING\`
   inside every slice of the framework).
-- Upstream modifications: none.
+- Upstream modifications: none to the compiled sources. The shipped headers are
+  upstream's, with the three framework-internal cross-includes respelled
+  relative so a framework module can resolve them without an include path (see
+  Artifact); nothing else differs.
 - Authentication: built-in NTLMSSP; Kerberos/GSSAPI is disabled.
 - Clang module: ${moduleName} (upstream's own module map, with the \`LibSMB2\`,
   \`Internal\` and explicit \`Raw\` submodules).
@@ -716,7 +745,12 @@ clang -dynamiclib -target <target> -isysroot <sysroot> \\
 dynamic library, the nine headers upstream's module map names under \`Headers/\`
 in their \`apple/\` and \`smb2/\` subdirectories, the module map at
 \`Modules/module.modulemap\`, an \`Info.plist\`, and the LGPL license as
-\`COPYING\`. The macOS slice carries the versioned bundle layout
+\`COPYING\`. In the shipped header copies, three framework-internal cross-includes
+are respelled from \`<smb2/x.h>\` to \`"x.h"\`: \`smb2/smb2.h\` includes
+\`smb2-errors.h\`, \`smb2/libsmb2.h\` includes \`libsmb2-dcerpc-srvsvc.h\`, and
+\`smb2/libsmb2-dcerpc-srvsvc.h\` includes \`libsmb2-dcerpc.h\`. A framework
+module has no include path, and clang's fallback framework lookup matches the
+include's prefix against the framework's name. The macOS slice carries the versioned bundle layout
 (\`Versions/A\`); every other slice carries the flat one, which is what those
 platforms accept. Every slice is ad hoc signed; the embedding application
 re-signs it.
