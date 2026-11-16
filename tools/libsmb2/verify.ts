@@ -1,86 +1,43 @@
+// The artifact gate. Every check expands the zips the way a consumer does and
+// asserts what the consumer depends on: the slice matrix, each bundle's layout
+// and Info.plist, the LC_BUILD_VERSION platform and floor, the install name,
+// that nothing links outside libSystem, the signatures, that the module map
+// still imports as `SMB2` and `SMB2.Raw` under that slice's own SDK, and that
+// the macOS slice actually loads and runs.
+
 import { basename, join, resolve } from '../lib/path.ts'
 import { capture, run } from '../lib/proc.ts'
 import {
   artifactName,
-  expectedObjectNames,
-  minimumMacOSVersion,
+  buildVersion,
+  bundleIdentifier,
+  frameworkName,
+  headers,
+  installName,
+  isVersionedLayout,
   moduleName,
-  publicHeaders,
+  platformCodes,
   sha256,
+  slices,
   sourceArtifactName,
   swiftPMArtifactName,
+  triple,
   upstreamSHA256,
   upstreamTag,
+  upstreamVersion,
+  xcframeworkName,
 } from './build.ts'
 
 const failures: string[] = []
 
-const allowedUndefinedSymbols = [
-  '__DefaultRuneLocale',
-  '___chkstk_darwin',
-  '___darwin_check_fd_set_overflow',
-  '___error',
-  '___maskrune',
-  '___memcpy_chk',
-  '___memmove_chk',
-  '___stack_chk_fail',
-  '___stack_chk_guard',
-  '___toupper',
-  '_accept',
-  '_asprintf',
-  '_bind',
-  '_bzero',
-  '_calloc',
-  '_close',
-  '_connect',
-  '_fclose',
-  '_fcntl',
-  '_feof',
-  '_fgets',
-  '_fopen',
-  '_free',
-  '_freeaddrinfo',
-  '_getaddrinfo',
-  '_getenv',
-  '_gethostname',
-  '_getlogin_r',
-  '_getpid',
-  '_getprotobyname',
-  '_getsockopt',
-  '_listen',
-  '_malloc',
-  '_memcmp',
-  '_memcpy',
-  '_memmove',
-  '_memset',
-  '_poll',
-  '_printf',
-  '_putchar',
-  '_puts',
-  '_random',
-  '_readv',
-  '_select',
-  '_setsockopt',
-  '_snprintf',
-  '_socket',
-  '_sprintf',
-  '_srandom',
-  '_strcat',
-  '_strchr',
-  '_strcmp',
-  '_strcpy',
-  '_strdup',
-  '_strerror',
-  '_strlen',
-  '_strncmp',
-  '_strncpy',
-  '_strtol',
-  '_time',
-  '_vsnprintf',
-  '_writev',
-]
-
 const allowedLinkedLibraries = ['/usr/lib/libSystem.B.dylib']
+
+const expectedExports = [
+  '_smb2_connect_share_async',
+  '_smb2_destroy_context',
+  '_smb2_init_context',
+  '_smb2_service',
+]
 
 function check(condition: boolean, description: string): void {
   console.log(`${condition ? 'ok  ' : 'FAIL'} ${description}`)
@@ -96,6 +53,14 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+async function isSymlink(path: string): Promise<boolean> {
+  try {
+    return (await Deno.lstat(path)).isSymlink
+  } catch {
+    return false
+  }
+}
+
 async function entryNames(dir: string): Promise<string[]> {
   const names: string[] = []
   for await (const entry of Deno.readDir(dir)) names.push(entry.name)
@@ -105,11 +70,6 @@ async function entryNames(dir: string): Promise<string[]> {
 async function plistValue(plist: string, key: string): Promise<string> {
   return (await capture(['plutil', '-extract', key, 'raw', '-o', '-', plist]))
     .trim()
-}
-
-function nmSymbols(output: string): string[] {
-  return output.split('\n').map((line) => line.trim().split(/\s+/).at(-1) ?? '')
-    .filter((symbol) => symbol.startsWith('_'))
 }
 
 function sameStrings(actual: string[], expected: string[]): boolean {
@@ -131,40 +91,69 @@ function printSetDifference(actual: string[], expected: string[]): void {
   }
 }
 
-async function verifyModule(scratch: string, headers: string): Promise<void> {
-  const probe = join(scratch, 'module-probe.m')
+function frameworkRoot(dir: string, slice: typeof slices[number]): string {
+  const bundle = join(dir, `${frameworkName}.framework`)
+  return isVersionedLayout(slice) ? join(bundle, 'Versions', 'A') : bundle
+}
+
+function frameworkBinary(dir: string, slice: typeof slices[number]): string {
+  return join(frameworkRoot(dir, slice), frameworkName)
+}
+
+async function sdkPath(slice: typeof slices[number]): Promise<string> {
+  return (await capture(['xcrun', '--sdk', slice.sdk, '--show-sdk-path']))
+    .trim()
+}
+
+async function verifyModule(
+  scratch: string,
+  dir: string,
+  slice: typeof slices[number],
+): Promise<void> {
+  const probe = join(scratch, `module-probe-${slice.id}.m`)
   await Deno.writeTextFile(
     probe,
-    `@import ${moduleName};\nint main(void) { return 0; }\n`,
+    `@import ${moduleName};
+@import ${moduleName}.Raw;
+int main(void) { return 0; }
+`,
   )
-  const compiled = await new Deno.Command('xcrun', {
+  const compiled = await new Deno.Command('clang', {
     args: [
-      '--sdk',
-      'macosx',
-      'clang',
       '-fsyntax-only',
+      '-x',
+      'objective-c',
+      '-target',
+      triple(slice),
+      '-isysroot',
+      await sdkPath(slice),
       '-fmodules',
-      `-fmodules-cache-path=${join(scratch, 'module-cache')}`,
-      `-fmodule-map-file=${join(headers, 'module.modulemap')}`,
-      `-I${headers}`,
+      `-fmodules-cache-path=${join(scratch, `module-cache-${slice.id}`)}`,
+      `-F${dir}`,
       probe,
     ],
     stdout: 'inherit',
     stderr: 'inherit',
   }).output()
-  check(compiled.success, `${moduleName}: module imports from published layout`)
+  check(
+    compiled.success,
+    `${slice.id}: ${moduleName} and ${moduleName}.Raw import from the published layout`,
+  )
 }
 
-async function verifyLink(
+// The macOS slice is the only one this machine can execute, so it carries the
+// proof that the bundle is not just well-formed but loadable.
+async function verifyRun(
   scratch: string,
-  headers: string,
-  archive: string,
+  dir: string,
+  slice: typeof slices[number],
 ): Promise<void> {
-  const probe = join(scratch, 'link-probe.c')
-  const executable = join(scratch, 'link-probe')
+  const probe = join(scratch, 'run-probe.c')
+  const executable = join(scratch, 'run-probe')
   await Deno.writeTextFile(
     probe,
-    `#include <libsmb2.h>
+    `#include <${frameworkName}/smb2/libsmb2.h>
+
 int main(void) {
   struct smb2_context *context = smb2_init_context();
   if (context == 0) return 1;
@@ -173,30 +162,25 @@ int main(void) {
 }
 `,
   )
-  const sdk = (await capture(['xcrun', '--sdk', 'macosx', '--show-sdk-path']))
-    .trim()
-  const linked = await new Deno.Command('xcrun', {
+  const linked = await new Deno.Command('clang', {
     args: [
-      '--sdk',
-      'macosx',
-      'clang',
-      '-arch',
-      'arm64',
-      `-mmacosx-version-min=${minimumMacOSVersion}`,
+      '-target',
+      triple(slice),
       '-isysroot',
-      sdk,
-      `-I${headers}`,
+      await sdkPath(slice),
+      `-F${dir}`,
+      `-Wl,-rpath,${resolve(dir)}`,
       probe,
-      `-Wl,-force_load,${archive}`,
+      '-framework',
+      frameworkName,
       '-o',
       executable,
     ],
     stdout: 'inherit',
     stderr: 'inherit',
   }).output()
-  check(linked.success, 'force-loaded static archive links successfully')
+  check(linked.success, 'a client links against the framework')
   if (!linked.success) return
-
   const linkedLibraries = (await capture(['otool', '-L', executable]))
     .split('\n')
     .slice(1)
@@ -204,41 +188,174 @@ int main(void) {
     .filter((path) => path !== '')
     .sort()
   check(
-    sameStrings(linkedLibraries, allowedLinkedLibraries),
-    'force-loaded archive links exactly the allowed Apple system libraries',
+    sameStrings(
+      linkedLibraries,
+      [installName, ...allowedLinkedLibraries].sort(),
+    ),
+    'the client loads the framework and nothing but libSystem',
   )
-  if (!sameStrings(linkedLibraries, allowedLinkedLibraries)) {
-    printSetDifference(linkedLibraries, allowedLinkedLibraries)
-  }
+  // `env` is how the permission set can name the runner: a temp path is not
+  // in the allow list, and the probe still has to be executed, not read.
+  const ran = await new Deno.Command('env', {
+    args: [executable],
+    stdout: 'inherit',
+  }).output()
+  check(ran.success, 'the macOS slice loads and creates a context')
 }
 
-async function verifyDeploymentTargets(
+async function verifySlice(
   scratch: string,
-  archive: string,
+  dir: string,
+  slice: typeof slices[number],
 ): Promise<void> {
-  const objects = join(scratch, 'archive-objects')
-  await Deno.mkdir(objects, { recursive: true })
-  await run(['ar', '-x', archive], objects)
-  const invalid: string[] = []
-  for (const object of expectedObjectNames) {
-    const build = await capture([
-      'xcrun',
-      'vtool',
-      '-show-build',
-      join(objects, object),
-    ])
-    if (
-      !build.includes('platform MACOS') ||
-      !build.includes(`minos ${minimumMacOSVersion}`)
-    ) {
-      invalid.push(object)
-    }
+  const root = frameworkRoot(dir, slice)
+  const bundle = join(dir, `${frameworkName}.framework`)
+  check(await exists(root), `${slice.id}: ${frameworkName}.framework`)
+  const binary = frameworkBinary(dir, slice)
+  check(await exists(binary), `${slice.id}: ${frameworkName} binary`)
+
+  for (const header of headers) {
+    check(
+      await exists(join(root, 'Headers', header)),
+      `${slice.id}: Headers/${header}`,
+    )
   }
-  check(
-    invalid.length === 0,
-    `all ${expectedObjectNames.length} objects target macOS ${minimumMacOSVersion}`,
+  const map = join(root, 'Modules', 'module.modulemap')
+  check(await exists(map), `${slice.id}: Modules/module.modulemap`)
+  if (await exists(map)) {
+    const text = await Deno.readTextFile(map)
+    check(
+      text.includes(`framework module ${moduleName} `),
+      `${slice.id}: declares framework module ${moduleName}`,
+    )
+    check(
+      text.includes('explicit module Raw'),
+      `${slice.id}: keeps Raw explicit`,
+    )
+    check(
+      text.includes('header "smb2/libsmb2-raw.h"'),
+      `${slice.id}: Raw is the raw-PDU header`,
+    )
+  }
+  const copying = join(
+    root,
+    ...(isVersionedLayout(slice) ? ['Resources', 'COPYING'] : ['COPYING']),
   )
-  for (const object of invalid) console.error(`  invalid target: ${object}`)
+  check(await exists(copying), `${slice.id}: COPYING`)
+  if (await exists(copying)) {
+    check(
+      (await Deno.readTextFile(copying)).includes(
+        'GNU LESSER GENERAL PUBLIC LICENSE',
+      ),
+      `${slice.id}: COPYING is the LGPL text`,
+    )
+  }
+
+  const plist = join(
+    root,
+    ...(isVersionedLayout(slice)
+      ? ['Resources', 'Info.plist']
+      : ['Info.plist']),
+  )
+  check(await exists(plist), `${slice.id}: Info.plist`)
+  if (await exists(plist)) {
+    check(
+      await plistValue(plist, 'CFBundleExecutable') === frameworkName,
+      `${slice.id}: CFBundleExecutable ${frameworkName}`,
+    )
+    check(
+      await plistValue(plist, 'CFBundleIdentifier') === bundleIdentifier,
+      `${slice.id}: CFBundleIdentifier ${bundleIdentifier}`,
+    )
+    check(
+      await plistValue(plist, 'CFBundlePackageType') === 'FMWK',
+      `${slice.id}: CFBundlePackageType FMWK`,
+    )
+    check(
+      await plistValue(plist, 'CFBundleVersion') === upstreamVersion,
+      `${slice.id}: CFBundleVersion ${upstreamVersion}`,
+    )
+    check(
+      await plistValue(plist, 'CFBundleSupportedPlatforms.0') ===
+        slice.bundlePlatform,
+      `${slice.id}: CFBundleSupportedPlatforms ${slice.bundlePlatform}`,
+    )
+    const minimumKey = isVersionedLayout(slice)
+      ? 'LSMinimumSystemVersion'
+      : 'MinimumOSVersion'
+    check(
+      await plistValue(plist, minimumKey) === slice.minVersion,
+      `${slice.id}: ${minimumKey} ${slice.minVersion}`,
+    )
+  }
+
+  if (isVersionedLayout(slice)) {
+    check(
+      await isSymlink(join(bundle, 'Versions', 'Current')),
+      `${slice.id}: Versions/Current symlink`,
+    )
+    for (
+      const entry of ['Headers', 'Modules', 'Resources', frameworkName]
+    ) {
+      check(
+        await isSymlink(join(bundle, entry)),
+        `${slice.id}: top-level ${entry} symlink`,
+      )
+    }
+  } else {
+    check(
+      !await isSymlink(join(bundle, 'Headers')),
+      `${slice.id}: flat bundle carries a real Headers directory`,
+    )
+  }
+
+  if (!await exists(binary)) return
+  check(
+    (await capture(['lipo', '-archs', binary])).trim() === 'arm64',
+    `${slice.id}: exactly arm64`,
+  )
+  const build = await buildVersion(binary)
+  check(
+    build.platform === String(platformCodes[slice.id]),
+    `${slice.id}: LC_BUILD_VERSION platform ${platformCodes[slice.id]}`,
+  )
+  check(
+    build.minos === slice.minVersion,
+    `${slice.id}: LC_BUILD_VERSION minos ${slice.minVersion}`,
+  )
+  const installNames = (await capture(['otool', '-D', binary]))
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+  check(
+    installNames.at(-1) === installName,
+    `${slice.id}: install name ${installName}`,
+  )
+  const linked = (await capture(['otool', '-L', binary]))
+    .split('\n')
+    .slice(2)
+    .map((line) => line.trim().split(/\s+/)[0] ?? '')
+    .filter((path) => path !== '')
+    .sort()
+  check(
+    sameStrings(linked, allowedLinkedLibraries),
+    `${slice.id}: links libSystem and nothing else`,
+  )
+  if (!sameStrings(linked, allowedLinkedLibraries)) {
+    printSetDifference(linked, allowedLinkedLibraries)
+  }
+  const symbols = await capture(['nm', '-gU', binary])
+  for (const symbol of expectedExports) {
+    check(symbols.includes(symbol), `${slice.id}: exports ${symbol.slice(1)}`)
+  }
+  const signed = await new Deno.Command('codesign', {
+    args: ['--verify', '--strict', bundle],
+    stdout: 'inherit',
+    stderr: 'inherit',
+  }).output()
+  check(signed.success, `${slice.id}: signature verifies`)
+
+  await verifyModule(scratch, dir, slice)
 }
 
 async function main(argv: string[]): Promise<void> {
@@ -267,97 +384,81 @@ async function main(argv: string[]): Promise<void> {
     await Deno.mkdir(expanded, { recursive: true })
     await run(['ditto', '-x', '-k', zip, expanded])
     check(
-      (await entryNames(expanded)).join(' ') ===
-        [
-          'LICENCE-LGPL-2.1.txt',
-          'PROVENANCE.md',
-          'libsmb2.xcframework',
-        ].sort().join(' '),
-      'zip root holds the xcframework, LGPL license, and provenance',
+      sameStrings(await entryNames(expanded), [
+        'LICENCE-LGPL-2.1.txt',
+        'PROVENANCE.md',
+        xcframeworkName,
+      ]),
+      'zip root holds the xcframework, the LGPL license, and provenance',
+    )
+    check(
+      (await Deno.readTextFile(join(expanded, 'PROVENANCE.md'))).includes(
+        `# libsmb2 ${upstreamVersion} for Arcroom`,
+      ),
+      'provenance names the upstream version',
     )
 
-    const xcframework = join(expanded, 'libsmb2.xcframework')
+    const xcframework = join(expanded, xcframeworkName)
     const plist = join(xcframework, 'Info.plist')
     check(await exists(plist), 'xcframework Info.plist')
-    check(
-      await plistValue(plist, 'AvailableLibraries.0.LibraryIdentifier') ===
-        'macos-arm64',
-      'LibraryIdentifier macos-arm64',
-    )
-    check(
-      await plistValue(
-        plist,
-        'AvailableLibraries.0.SupportedArchitectures.0',
-      ) === 'arm64',
-      'SupportedArchitectures arm64',
-    )
-    check(
-      await plistValue(plist, 'AvailableLibraries.0.SupportedPlatform') ===
-        'macos',
-      'SupportedPlatform macos',
-    )
-    check(
-      await plistValue(plist, 'AvailableLibraries.0.LibraryPath') ===
-        'libsmb2.a',
-      'LibraryPath libsmb2.a',
-    )
-    check(
-      await plistValue(plist, 'AvailableLibraries.0.HeadersPath') ===
-        'Headers',
-      'HeadersPath Headers',
-    )
-
-    const slice = join(xcframework, 'macos-arm64')
-    const archive = join(slice, 'libsmb2.a')
-    const headers = join(slice, 'Headers')
-    check(await exists(archive), 'static libsmb2.a')
-    check(
-      (await capture(['lipo', '-archs', archive])).trim() === 'arm64',
-      'archive contains exactly arm64',
-    )
-    const members = (await capture(['ar', '-t', archive])).trim().split('\n')
-      .filter((member) => !member.startsWith('__.SYMDEF'))
-    check(
-      sameStrings(members, expectedObjectNames),
-      `archive contains exactly the ${expectedObjectNames.length} expected objects`,
-    )
-    if (!sameStrings(members, expectedObjectNames)) {
-      printSetDifference(members, expectedObjectNames)
-    }
-    for (const header of publicHeaders) {
-      check(await exists(join(headers, 'smb2', header)), `public ${header}`)
-    }
-    check(await exists(join(headers, 'libsmb2.h')), 'umbrella libsmb2.h')
-    check(await exists(join(headers, 'module.modulemap')), 'module.modulemap')
-
-    const symbols = await capture(['nm', '-gU', archive])
-    for (
-      const symbol of [
-        '_smb2_init_context',
-        '_smb2_destroy_context',
-        '_smb2_connect_share_async',
-        '_smb2_service',
-      ]
-    ) {
-      check(symbols.includes(symbol), `exports ${symbol.slice(1)}`)
-    }
-    const definedSymbols = new Set(nmSymbols(symbols))
-    const undefinedSymbols = nmSymbols(await capture(['nm', '-u', archive]))
-      .filter((symbol) => !definedSymbols.has(symbol))
-      .filter((symbol, index, all) => all.indexOf(symbol) === index)
-      .sort()
-    const expectedUndefinedSymbols = allowedUndefinedSymbols.toSorted()
-    check(
-      sameStrings(undefinedSymbols, expectedUndefinedSymbols),
-      'archive has exactly the allowed Apple system undefined symbols',
-    )
-    if (!sameStrings(undefinedSymbols, expectedUndefinedSymbols)) {
-      printSetDifference(undefinedSymbols, expectedUndefinedSymbols)
+    if (await exists(plist)) {
+      const identifiers = await entryNames(xcframework)
+      check(
+        sameStrings(
+          identifiers,
+          slices.map((slice) => slice.id).sort().concat('Info.plist'),
+        ),
+        'xcframework holds exactly one directory per slice',
+      )
+      for (const [index, slice] of slices.entries()) {
+        const at = (key: string) => `AvailableLibraries.${index}.${key}`
+        check(
+          await plistValue(plist, at('LibraryIdentifier')) === slice.id,
+          `${slice.id}: LibraryIdentifier row ${index}`,
+        )
+        check(
+          await plistValue(plist, at('SupportedPlatform')) ===
+            slice.supportedPlatform,
+          `${slice.id}: SupportedPlatform ${slice.supportedPlatform}`,
+        )
+        if (slice.supportedPlatformVariant === null) {
+          check(
+            !(await capture([
+              'plutil',
+              '-extract',
+              at('SupportedPlatformVariant'),
+              'raw',
+              '-o',
+              '-',
+              plist,
+            ]).catch(() => '')).trim(),
+            `${slice.id}: no SupportedPlatformVariant`,
+          )
+        } else {
+          check(
+            await plistValue(plist, at('SupportedPlatformVariant')) ===
+              slice.supportedPlatformVariant,
+            `${slice.id}: SupportedPlatformVariant ${slice.supportedPlatformVariant}`,
+          )
+        }
+        check(
+          await plistValue(plist, at('SupportedArchitectures.0')) === 'arm64',
+          `${slice.id}: SupportedArchitectures arm64`,
+        )
+        check(
+          await plistValue(plist, at('LibraryPath')) ===
+            `${frameworkName}.framework`,
+          `${slice.id}: LibraryPath ${frameworkName}.framework`,
+        )
+      }
     }
 
-    await verifyDeploymentTargets(scratch, archive)
-    await verifyModule(scratch, headers)
-    await verifyLink(scratch, headers, archive)
+    for (const slice of slices) {
+      await verifySlice(scratch, join(xcframework, slice.id), slice)
+    }
+
+    const macOS = slices.find((slice) => slice.supportedPlatform === 'macos')!
+    await verifyRun(scratch, join(xcframework, macOS.id), macOS)
 
     const swiftPMZip = join(dist, swiftPMArtifactName)
     check(await exists(swiftPMZip), `${basename(swiftPMZip)} present`)
@@ -365,19 +466,15 @@ async function main(argv: string[]): Promise<void> {
     await Deno.mkdir(swiftPM, { recursive: true })
     await run(['ditto', '-x', '-k', swiftPMZip, swiftPM])
     check(
-      (await entryNames(swiftPM)).join(' ') === 'libsmb2.xcframework',
-      'SwiftPM zip holds libsmb2.xcframework at its root',
+      sameStrings(await entryNames(swiftPM), [xcframeworkName]),
+      'SwiftPM zip holds the xcframework at its root',
     )
     const same = await new Deno.Command('diff', {
-      args: [
-        '-r',
-        join(swiftPM, 'libsmb2.xcframework'),
-        xcframework,
-      ],
+      args: ['-r', join(swiftPM, xcframeworkName), xcframework],
       stdout: 'inherit',
       stderr: 'inherit',
     }).output()
-    check(same.success, 'SwiftPM XCFramework matches the combined zip')
+    check(same.success, 'SwiftPM xcframework matches the combined zip')
 
     const source = join(dist, sourceArtifactName)
     check(await exists(source), `${basename(source)} present`)
@@ -385,9 +482,9 @@ async function main(argv: string[]): Promise<void> {
       await sha256(source) === upstreamSHA256,
       'source asset is byte-identical to the pinned upstream tarball',
     )
-    const sourceMembers = await capture(['tar', '-tzf', source])
+    const members = await capture(['tar', '-tzf', source])
     check(
-      sourceMembers.split('\n').includes(
+      members.split('\n').includes(
         `libsmb2-${upstreamTag}/LICENCE-LGPL-2.1.txt`,
       ),
       'source asset contains the upstream LGPL license',

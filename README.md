@@ -6,41 +6,58 @@
 
 Pinned Apple-platform builds of LGPL-2.1 C libraries consumed by the
 [Arcroom](https://github.com/wuhu-labs/wuhu) app, and the scripts that produce
-them. ffmpeg ships as relinkable dynamic frameworks. libsmb2 is a static
-XCFramework; an application distributing it must provide its relinkable object
-files or an equivalent mechanism in addition to the corresponding source and
-license required by LGPL-2.1 section 6.
+them. ffmpeg and libsmb2 ship as relinkable dynamic frameworks. libass is a
+static XCFramework; an application distributing it must provide its relinkable
+object files or an equivalent mechanism in addition to the corresponding source
+and license required by LGPL-2.1 section 6.
 
 ## Current residents
 
 ### libsmb2 6.2
 
-Release tag `libsmb2/6.2-arcroom.1` carries an unmodified, unforked static build
-of upstream tag `libsmb2-6.2` for macOS arm64. `libsmb2.xcframework` exposes the
-high-level public API as Clang module `CSMB2`; built-in NTLMSSP is enabled and
-Kerberos/GSSAPI is disabled.
+Release tag `libsmb2/6.2-arcroom.2` carries an unmodified, unforked dynamic
+build of upstream tag `libsmb2-6.2` for seven arm64 slices.
+`libsmb2.xcframework` holds one `SMB2.framework` per slice — the Clang module is
+upstream's own `SMB2`, with its `LibSMB2`, `Internal` and explicit `Raw`
+submodules and the nine headers the module map names; built-in NTLMSSP is
+enabled and Kerberos/GSSAPI is disabled.
+
+| LibraryIdentifier | SDK | deployment target |
+| --- | --- | --- |
+| `macos-arm64` | `macosx` | macOS 15.4 |
+| `ios-arm64` | `iphoneos` | iOS 18.4 |
+| `ios-arm64-simulator` | `iphonesimulator` | iOS 18.4 |
+| `tvos-arm64` | `appletvos` | tvOS 26.0 |
+| `tvos-arm64-simulator` | `appletvsimulator` | tvOS 26.0 |
+| `xros-arm64` | `xros` | visionOS 26.0 |
+| `xros-arm64-simulator` | `xrsimulator` | visionOS 26.0 |
+
+There is no x86_64 anywhere, and the floors are Arcroom's, from its
+`package.yml`. The framework's install name is `@rpath/SMB2.framework/SMB2`, so
+a consumer needs one rpath to its own `Frameworks` directory and nothing
+per-framework. The bundle is named `SMB2.framework`, not `libsmb2.framework`,
+because clang resolves a framework module only under the framework's own name:
+`import SMB2` and `import SMB2.Raw` are the consumer's source, unchanged. Only
+the macOS slice carries the versioned `Versions/A` layout; the other platforms
+require the flat one. The LGPL license rides inside every slice as `COPYING`.
 
 The release has three assets:
 
-- `libsmb2-6.2-arcroom.1-macos-arm64.zip` — the XCFramework, upstream
+- `libsmb2-6.2-arcroom.2-apple-arm64.zip` — the xcframework, upstream
   `LICENCE-LGPL-2.1.txt`, and generated `PROVENANCE.md`, for a Bazel
-  `apple_static_xcframework_import`.
-- `CSMB2-6.2-arcroom.1-macos-arm64.zip` — the same XCFramework alone at the
+  `apple_dynamic_xcframework_import`.
+- `SMB2-6.2-arcroom.2-apple-arm64.zip` — the same xcframework alone at the
   archive root, in the shape required by a SwiftPM `binaryTarget`.
 - `libsmb2-6.2-source.tar.gz` — the exact pinned upstream source tarball,
   including `LICENCE-LGPL-2.1.txt`; its sha256 is
   `8e1f9efc6b2e0f6546f0fe121ac0ddf4fc2f0908ae5a6bd1f185be7c9e0bcbb3`.
 
-SwiftPM binary targets cannot carry the license and provenance beside the
-XCFramework at the archive root, so the release's combined archive supplies
-those notices and the source asset supplies the durable corresponding source.
-An application distributor must still carry the required notice and provide
-its object files or an equivalent relinking mechanism; these assets do not by
-themselves discharge that distributor's LGPL obligations.
-
-This one-slice platform set no longer matches the ffmpeg and libass artifacts
-below, which both carry macOS, iOS, tvOS and visionOS slices. libsmb2 owes the
-same widening; it is a separate artifact revision and has not been cut.
+The library is dynamic and relinkable: the application links `SMB2.framework`
+and embeds it in its own `Frameworks` directory, so replacing that bundle with
+a build of the corresponding source discharges LGPL v2.1 section 6. SwiftPM
+binary targets cannot carry the license and provenance beside the xcframework
+at the archive root, so the combined archive supplies those notices and the
+source asset supplies the durable corresponding source.
 
 Corresponding source and the complete build configuration are recorded in
 [`PROVENANCE-libsmb2.md`](PROVENANCE-libsmb2.md). The source tag resolves to
@@ -82,7 +99,7 @@ Assets:
   archive root, for a SwiftPM `binaryTarget`.
 - `<name>-<version>-source.tar.*` — the five exact pinned upstream tarballs.
 
-FriBidi is LGPL-2.1 and statically linked, so the libsmb2 relinking caveat
+FriBidi is LGPL-2.1 and statically linked, so the static relinking caveat above
 applies to it; the other four are ISC, FTL, MIT and zlib. Build configuration
 and hashes are in [`PROVENANCE-libass.md`](PROVENANCE-libass.md).
 
@@ -172,7 +189,7 @@ This repo has no third-party dependencies.
 deno task ffmpeg-build                 # writes dist-ffmpeg/*.zip, prints sha256s
 deno task ffmpeg-verify dist-ffmpeg    # expands the zips and asserts the layout
 deno task libsmb2-build                # writes two zips and the source tarball
-deno task libsmb2-verify dist-libsmb2  # verifies archive, module, and link
+deno task libsmb2-verify dist-libsmb2  # verifies every slice, module, and run
 ```
 
 `ffmpeg-build` accepts `--out <dir>` for the output directory, `--scratch <dir>`
@@ -224,11 +241,11 @@ git fetch origin main --tags
 test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 deno task libsmb2-build
 deno task libsmb2-verify dist-libsmb2
-git tag libsmb2/6.2-arcroom.1 HEAD
-git push origin refs/tags/libsmb2/6.2-arcroom.1
-gh release create libsmb2/6.2-arcroom.1 --verify-tag \
-  dist-libsmb2/libsmb2-6.2-arcroom.1-macos-arm64.zip \
-  dist-libsmb2/CSMB2-6.2-arcroom.1-macos-arm64.zip \
+git tag libsmb2/6.2-arcroom.2 HEAD
+git push origin refs/tags/libsmb2/6.2-arcroom.2
+gh release create libsmb2/6.2-arcroom.2 --verify-tag \
+  dist-libsmb2/libsmb2-6.2-arcroom.2-apple-arm64.zip \
+  dist-libsmb2/SMB2-6.2-arcroom.2-apple-arm64.zip \
   dist-libsmb2/libsmb2-6.2-source.tar.gz
 ```
 
