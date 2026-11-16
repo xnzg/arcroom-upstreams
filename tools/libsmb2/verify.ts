@@ -195,11 +195,14 @@ async function verifyRun(
   dir: string,
   slice: typeof slices[number],
 ): Promise<void> {
-  const probe = join(scratch, 'run-probe.c')
+  // An Objective-C client, because importing the module is what a consumer
+  // does: the module map, not a bare header, is what carries the C headers'
+  // standard-library prerequisites.
+  const probe = join(scratch, 'run-probe.m')
   const executable = join(scratch, 'run-probe')
   await Deno.writeTextFile(
     probe,
-    `#include <${frameworkName}/smb2/libsmb2.h>
+    `@import ${moduleName};
 
 int main(void) {
   struct smb2_context *context = smb2_init_context();
@@ -215,6 +218,7 @@ int main(void) {
       triple(slice),
       '-isysroot',
       await sdkPath(slice),
+      '-fmodules',
       `-F${dir}`,
       `-Wl,-rpath,${resolve(dir)}`,
       probe,
@@ -453,7 +457,7 @@ async function main(argv: string[]): Promise<void> {
       check(
         sameStrings(
           identifiers,
-          slices.map((slice) => slice.id).sort().concat('Info.plist'),
+          [...slices.map((slice) => slice.id), 'Info.plist'].sort(),
         ),
         'xcframework holds exactly one directory per slice',
       )
